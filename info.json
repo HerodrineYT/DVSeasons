@@ -1,8 +1,8 @@
 {
   "Id": "DVSeasons",
-  "DisplayName": "DV Seasons",
+  "DisplayName": "Dynamic Seasons",
   "Author": "Herodrine_",
-  "Version": "0.1.0",
+  "Version": "0.1.1",
   "AssemblyName": "DVSeasons.dll",
   "EntryMethod": "DVSeasons.Mod.Main.Load",
   "ManagerVersion": "0.32.4",
