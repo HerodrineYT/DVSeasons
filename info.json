@@ -1,0 +1,11 @@
+{
+  "Id": "DVSeasons",
+  "DisplayName": "DV Seasons",
+  "Author": "Herodrine_",
+  "Version": "0.1.0",
+  "AssemblyName": "DVSeasons.dll",
+  "EntryMethod": "DVSeasons.Mod.Main.Load",
+  "ManagerVersion": "0.32.4",
+  "LoadAfter": ["Multiplayer", "DoubleTrack", "PassengerJobs", "Mapify", "CustomCarLoader"],
+  "MultiplayerCompatibility": "All"
+}
