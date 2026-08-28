@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>DVSeasons</AssemblyName>
+    <RootNamespace>DVSeasons.Mod</RootNamespace>
+    <Version>0.1.2</Version>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\DVSeasons.Common\DVSeasons.Common.csproj" />
+    <ProjectReference Include="..\DVSeasons.MP\DVSeasons.MP.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="UnityModManager"><HintPath>$(DVManagedDir)\UnityModManager\UnityModManager.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(DVManagedDir)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.IMGUIModule"><HintPath>$(DVManagedDir)\UnityEngine.IMGUIModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.AssetBundleModule"><HintPath>$(DVManagedDir)\UnityEngine.AssetBundleModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.ParticleSystemModule"><HintPath>$(DVManagedDir)\UnityEngine.ParticleSystemModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.TerrainModule"><HintPath>$(DVManagedDir)\UnityEngine.TerrainModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="DV.Utils"><HintPath>$(DVManagedDir)\DV.Utils.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="DV.WeatherSystem"><HintPath>$(DVManagedDir)\DV.WeatherSystem.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="I2.Localization"><HintPath>$(DVManagedDir)\I2.Localization.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="info.source.json" Link="info.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Resources\Runtime\AssetBundles\dvseasons_dv99"
+          Link="AssetBundles\dvseasons_dv99"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="BuildDistribution" AfterTargets="Build">
+    <ItemGroup>
+      <DistributionFiles Include="$(TargetDir)DVSeasons*.dll" />
+      <DistributionFiles Include="$(TargetDir)DVSeasons*.pdb" />
+      <DistributionFiles Include="$(TargetDir)info.json" />
+      <DistributionFiles Include="$(MSBuildProjectDirectory)\..\DVSeasons.MP\bin\$(Configuration)\DVSeasons.Multiplayer.dll" />
+      <DistributionFiles Include="$(MSBuildProjectDirectory)\..\DVSeasons.MP\bin\$(Configuration)\DVSeasons.Multiplayer.pdb" Condition="Exists('$(MSBuildProjectDirectory)\..\DVSeasons.MP\bin\$(Configuration)\DVSeasons.Multiplayer.pdb')" />
+      <AssetBundleFiles Include="$(TargetDir)AssetBundles\*" />
+    </ItemGroup>
+    <RemoveDir Directories="$(DVSeasonsBuildOutputDir)" />
+    <MakeDir Directories="$(DVSeasonsBuildOutputDir)" />
+    <Copy SourceFiles="@(DistributionFiles)" DestinationFolder="$(DVSeasonsBuildOutputDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(AssetBundleFiles)"
+          DestinationFiles="@(AssetBundleFiles->'$(DVSeasonsBuildOutputDir)\AssetBundles\%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+</Project>

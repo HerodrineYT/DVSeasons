@@ -1,0 +1,19 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework Condition="'$(TargetFramework)' == ''">netstandard2.0</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <Nullable>disable</Nullable>
+    <Deterministic>true</Deterministic>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <DebugType>portable</DebugType>
+
+    <!-- Pass -p:DVInstallDir=... or set DERAIL_VALLEY_DIR. -->
+    <DVInstallDir Condition="'$(DVInstallDir)' == '' and '$(DERAIL_VALLEY_DIR)' != ''">$(DERAIL_VALLEY_DIR)</DVInstallDir>
+    <DVManagedDir Condition="'$(DVInstallDir)' != ''">$(DVInstallDir)\DerailValley_Data\Managed</DVManagedDir>
+    <DVModsDir Condition="'$(DVInstallDir)' != ''">$(DVInstallDir)\Mods</DVModsDir>
+
+    <DVSeasonsArtifactsDir>$(MSBuildThisFileDirectory)artifacts</DVSeasonsArtifactsDir>
+    <DVSeasonsBuildOutputDir>$(DVSeasonsArtifactsDir)\build\DVSeasons</DVSeasonsBuildOutputDir>
+  </PropertyGroup>
+</Project>
+

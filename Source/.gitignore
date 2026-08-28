@@ -1,0 +1,16 @@
+.vs/
+**/bin/
+**/obj/
+DVSeasons.Unity/Library/
+DVSeasons.Unity/Logs/
+DVSeasons.Unity/Temp/
+DVSeasons.Unity/UserSettings/
+DVSeasons.Unity/Build/
+DVSeasons.Unity/Assets/DVSeasons/DV99/Generated/
+artifacts/build/
+artifacts/releases/
+artifacts/legacy/
+*.user
+*.suo
+*.pyc
+__pycache__/

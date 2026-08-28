@@ -1,0 +1,36 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DVSeasons.Common", "DVSeasons.Common\DVSeasons.Common.csproj", "{A64B38A1-A021-4C57-A8C4-58BE5C624FAB}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DVSeasons.Game", "DVSeasons.Game\DVSeasons.Game.csproj", "{639548D6-ABBB-4F5B-BE35-C73907C46F37}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DVSeasons.MP", "DVSeasons.MP\DVSeasons.MP.csproj", "{915110C5-415B-4558-B410-95A8BD9D5E0D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DVSeasons.Tests", "DVSeasons.Tests\DVSeasons.Tests.csproj", "{9F10963D-56F5-47C2-903E-9784CD4B37A0}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A64B38A1-A021-4C57-A8C4-58BE5C624FAB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A64B38A1-A021-4C57-A8C4-58BE5C624FAB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A64B38A1-A021-4C57-A8C4-58BE5C624FAB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A64B38A1-A021-4C57-A8C4-58BE5C624FAB}.Release|Any CPU.Build.0 = Release|Any CPU
+		{639548D6-ABBB-4F5B-BE35-C73907C46F37}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{639548D6-ABBB-4F5B-BE35-C73907C46F37}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{639548D6-ABBB-4F5B-BE35-C73907C46F37}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{639548D6-ABBB-4F5B-BE35-C73907C46F37}.Release|Any CPU.Build.0 = Release|Any CPU
+		{915110C5-415B-4558-B410-95A8BD9D5E0D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{915110C5-415B-4558-B410-95A8BD9D5E0D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{915110C5-415B-4558-B410-95A8BD9D5E0D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{915110C5-415B-4558-B410-95A8BD9D5E0D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9F10963D-56F5-47C2-903E-9784CD4B37A0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9F10963D-56F5-47C2-903E-9784CD4B37A0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9F10963D-56F5-47C2-903E-9784CD4B37A0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9F10963D-56F5-47C2-903E-9784CD4B37A0}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
