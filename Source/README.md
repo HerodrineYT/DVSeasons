@@ -20,30 +20,6 @@ Multiplayer не является обязательной зависимост�
 
 Подробное описание границ каталогов находится в `Docs/PROJECT_STRUCTURE.md`.
 
-## Сборка и тесты
-
-Требуются .NET SDK 8.0.421 или более новый совместимый feature band и установленная Derail Valley. Самый простой вариант:
-
-```powershell
-.\Tools\build.ps1
-```
-
-Скрипт находит 64-битный `dotnet`, установленную игру на доступных дисках, собирает runtime-проект и запускает тесты. Другой каталог игры можно передать явно:
-
-```powershell
-.\Tools\build.ps1 -DVInstallDir "D:\SteamLibrary\steamapps\common\Derail Valley"
-```
-
-Результат появляется в `artifacts/build/DVSeasons`. Прямые команды и требования к зависимостям описаны в `Docs/BUILDING.md`.
-
-## Установка
-
-1. Закройте Derail Valley.
-2. Скопируйте `artifacts/build/DVSeasons` в `<Derail Valley>/Mods/DVSeasons`.
-3. Проверьте наличие `info.json`, трёх `DVSeasons*.dll`, `AssetBundles/dvseasons_dv99`, трёх служебных PNG в `Textures` и четырёх атласов в `Textures/Seasonal`.
-4. Запустите игру и включите **Dynamic Seasons** в Unity Mod Manager.
-
-Сборка проекта сама по себе ничего не устанавливает и не изменяет в каталоге игры.
 
 ## Реализованный функционал
 
