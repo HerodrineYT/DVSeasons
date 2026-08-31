@@ -44,4 +44,4 @@
 .\Tools\build_assetbundle.ps1 -UnityEditor "C:\Program Files\Unity\Hub\Editor\2019.4.40f1\Editor\Unity.exe"
 ```
 
-Unity собирает промежуточный deterministic LZ4 bundle из 123 PNG и трёх генерируемых `Texture2DArray`. Затем скрипт перепаковывает его в LZMA и атомарно заменяет runtime-копию. Для перепаковки нужен Python с пакетами из `Tools/requirements.txt`.
+Unity собирает промежуточный deterministic LZ4 bundle из 127 PNG и трёх генерируемых `Texture2DArray`. Затем скрипт перепаковывает его в LZMA и атомарно заменяет runtime-копию. Для перепаковки нужен Python с пакетами из `Tools/requirements.txt`.

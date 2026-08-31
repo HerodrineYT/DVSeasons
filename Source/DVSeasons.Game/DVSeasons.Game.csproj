@@ -3,7 +3,7 @@
     <TargetFramework>net48</TargetFramework>
     <AssemblyName>DVSeasons</AssemblyName>
     <RootNamespace>DVSeasons.Mod</RootNamespace>
-    <Version>0.1.2</Version>
+    <Version>0.2.0</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
   <ItemGroup>
@@ -14,17 +14,37 @@
     <Reference Include="UnityModManager"><HintPath>$(DVManagedDir)\UnityModManager\UnityModManager.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.CoreModule"><HintPath>$(DVManagedDir)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.IMGUIModule"><HintPath>$(DVManagedDir)\UnityEngine.IMGUIModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.ImageConversionModule"><HintPath>$(DVManagedDir)\UnityEngine.ImageConversionModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.AssetBundleModule"><HintPath>$(DVManagedDir)\UnityEngine.AssetBundleModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.AudioModule"><HintPath>$(DVManagedDir)\UnityEngine.AudioModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.ParticleSystemModule"><HintPath>$(DVManagedDir)\UnityEngine.ParticleSystemModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(DVManagedDir)\UnityEngine.PhysicsModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.TerrainModule"><HintPath>$(DVManagedDir)\UnityEngine.TerrainModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="DV.Utils"><HintPath>$(DVManagedDir)\DV.Utils.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="DV.WeatherSystem"><HintPath>$(DVManagedDir)\DV.WeatherSystem.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="DV.LayeredAudio"><HintPath>$(DVManagedDir)\DV.LayeredAudio.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Assembly-CSharp"><HintPath>$(DVManagedDir)\Assembly-CSharp.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(DVManagedDir)\UnityModManager\0Harmony.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="I2.Localization"><HintPath>$(DVManagedDir)\I2.Localization.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
   <ItemGroup>
-    <None Include="info.source.json" Link="info.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="info.source.json"
+          Link="info.json"
+          CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Resources\Runtime\AssetBundles\dvseasons_dv99"
           Link="AssetBundles\dvseasons_dv99"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Resources\Runtime\Textures\snowflake_realistic.png"
+          Link="Textures\snowflake_realistic.png"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Resources\Runtime\Textures\snowflake_variations.png"
+          Link="Textures\snowflake_variations.png"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Resources\Runtime\Textures\winter_ballast_balanced.png"
+          Link="Textures\winter_ballast_balanced.png"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Resources\Runtime\Textures\Seasonal\**\*.png"
+          Link="Textures\Seasonal\%(RecursiveDir)%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <Target Name="BuildDistribution" AfterTargets="Build">
@@ -35,12 +55,16 @@
       <DistributionFiles Include="$(MSBuildProjectDirectory)\..\DVSeasons.MP\bin\$(Configuration)\DVSeasons.Multiplayer.dll" />
       <DistributionFiles Include="$(MSBuildProjectDirectory)\..\DVSeasons.MP\bin\$(Configuration)\DVSeasons.Multiplayer.pdb" Condition="Exists('$(MSBuildProjectDirectory)\..\DVSeasons.MP\bin\$(Configuration)\DVSeasons.Multiplayer.pdb')" />
       <AssetBundleFiles Include="$(TargetDir)AssetBundles\*" />
+      <TextureFiles Include="$(TargetDir)Textures\**\*" />
     </ItemGroup>
     <RemoveDir Directories="$(DVSeasonsBuildOutputDir)" />
     <MakeDir Directories="$(DVSeasonsBuildOutputDir)" />
     <Copy SourceFiles="@(DistributionFiles)" DestinationFolder="$(DVSeasonsBuildOutputDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(AssetBundleFiles)"
           DestinationFiles="@(AssetBundleFiles->'$(DVSeasonsBuildOutputDir)\AssetBundles\%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(TextureFiles)"
+          DestinationFiles="@(TextureFiles->'$(DVSeasonsBuildOutputDir)\Textures\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
 </Project>

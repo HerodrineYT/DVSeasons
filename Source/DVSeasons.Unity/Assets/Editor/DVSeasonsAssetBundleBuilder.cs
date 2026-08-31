@@ -22,7 +22,7 @@ namespace DVSeasons.AssetBundleBuild
             var assets = new List<string>(guids.Length);
             for (var i = 0; i < guids.Length; i++) assets.Add(AssetDatabase.GUIDToAssetPath(guids[i]));
             assets.Sort(StringComparer.Ordinal);
-            if (assets.Count != 123) throw new InvalidOperationException("Expected 123 Texture2D assets, found " + assets.Count);
+            if (assets.Count != 127) throw new InvalidOperationException("Expected 127 Texture2D assets, found " + assets.Count);
             assets.Add(AssetRoot + "/Generated/Terrain_spring.asset");
             assets.Add(AssetRoot + "/Generated/Terrain_autumn.asset");
             assets.Add(AssetRoot + "/Generated/Terrain_winter.asset");
@@ -38,7 +38,7 @@ namespace DVSeasons.AssetBundleBuild
             if (manifest == null || !File.Exists(Path.Combine(output, BundleName)))
                 throw new InvalidOperationException("Unity did not produce " + BundleName);
             Debug.Log("DVSeasons AssetBundle built: " + Path.Combine(output, BundleName) +
-                " (123 textures + 3 MicroSplat terrain arrays)");
+                " (127 textures + 3 MicroSplat terrain arrays)");
         }
 
         private static void ConfigureTextureImporters()

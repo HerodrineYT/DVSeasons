@@ -1,7 +1,17 @@
-# Универсальный архив DVSeasons 0.1.2
+# Универсальный архив DVSeasons 0.2.0
 
-Этот каталог содержит исходный код, тесты, документацию, ресурсы и Unity-проект. Вспомогательные PowerShell- и Python-инструменты не включены для совместимости с проверками Nexus Mods.
+Один ZIP одновременно является готовым пакетом Unity Mod Manager и архивом публикуемого исходного кода. Каталог `DVSeasons` можно передать UMM целиком; исходники находятся внутри `DVSeasons/Source` и не мешают загрузке мода.
 
-Сборка: dotnet build .\DVSeasons.Game\DVSeasons.Game.csproj -c Release -p:DVInstallDir="D:\Games\Derail Valley"
+Runtime находится в корне `DVSeasons`, а исходники и инструменты сборки — в `Source`. Внутри нет вложенных архивов или отдельных установщиков. Проверки Nexus Mods могут потребовать ручного рассмотрения DLL мода.
 
-Тесты: dotnet test .\DVSeasons.Tests\DVSeasons.Tests.csproj -c Release
+Сборка исходников:
+
+```powershell
+dotnet build .\DVSeasons.Game\DVSeasons.Game.csproj -c Release -p:DVInstallDir="D:\Games\Derail Valley"
+```
+
+Тесты:
+
+```powershell
+dotnet test .\DVSeasons.Tests\DVSeasons.Tests.csproj -c Release
+```

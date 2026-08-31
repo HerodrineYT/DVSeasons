@@ -7,13 +7,17 @@ namespace DVSeasons.Mod
     {
         public bool AutomaticCycle = true;
         public float DaysPerSeason = 14f;
+        public bool RandomTransitionDuration = true;
         public float TransitionDays = 3f;
+        public int TransitionSeason = -1;
         public int StartingSeason;
         public bool HasSavedPhase;
         public float SavedPhase;
         public bool SnowParticlesEnabled = true;
         public float SnowfallDensity = 1f;
-        public float AmbientWinterSnowfall = 0.06f;
+        // Retained only for settings-file compatibility. Snowfall now follows the
+        // native WeatherDriver.RainValue exclusively.
+        public float AmbientWinterSnowfall;
         public bool GroundSnowEnabled = true;
         public float GroundSnowStrength = 1f;
         public float FoliageTintStrength = 0.75f;
@@ -26,11 +30,21 @@ namespace DVSeasons.Mod
         public bool LeaflessDistantTrees = true;
         public float WinterFullTreeDistance = 750f;
         public int WinterFullTreeCount = 1200;
+        // Retained for settings-file compatibility with 0.1.41. Winter keeps the
+        // exact summer treeDistance so silhouettes occupy identical positions.
+        public float WinterTreeDistanceMultiplier = 1f;
+        public float WinterDetailDistanceMultiplier = 1.2f;
+        // Retained for settings-file compatibility. The middle-distance winter LOD
+        // is controlled by WinterFullTreeDistance above.
+        public float WinterBillboardStartDistance = 180f;
         public float TextureChangeStrength = 1f;
         public int SeasonalTextureResolution = 256;
         public int TextureUpdatesPerFrame = 1;
         public int MaximumSeasonalTextures = 64;
         public bool ReplaceRainWithSnow = true;
+        public bool MuteRainAudioDuringSnow = true;
+        public bool SeasonalPrecipitationEnabled = true;
+        public bool DisableWinterThunder = true;
         public bool WinterAdhesionEnabled = true;
         public float WinterWetnessEquivalent = 0.45f;
         public bool RespectExternalWetnessOverride = true;
@@ -57,8 +71,10 @@ namespace DVSeasons.Mod
             WinterAdhesionEnabled = true;
             if (DaysPerSeason < 1f) DaysPerSeason = 1f;
             if (DaysPerSeason > 365f) DaysPerSeason = 365f;
-            if (TransitionDays < 0f) TransitionDays = 0f;
-            if (TransitionDays > DaysPerSeason) TransitionDays = DaysPerSeason;
+            if (TransitionDays < 1f) TransitionDays = 1f;
+            var maximumTransitionDays = DaysPerSeason < 5f ? DaysPerSeason : 5f;
+            if (TransitionDays > maximumTransitionDays) TransitionDays = maximumTransitionDays;
+            if (TransitionSeason < -1 || TransitionSeason > 3) TransitionSeason = -1;
             if (StartingSeason < 0 || StartingSeason > 3) StartingSeason = 0;
             if (SnowfallDensity < 0f) SnowfallDensity = 0f;
             if (SnowfallDensity > 2f) SnowfallDensity = 2f;
@@ -73,9 +89,18 @@ namespace DVSeasons.Mod
             if (DistantTerrainDetailDistance < 500f) DistantTerrainDetailDistance = 500f;
             if (DistantTerrainDetailDistance > 20000f) DistantTerrainDetailDistance = 20000f;
             if (WinterFullTreeDistance < 150f) WinterFullTreeDistance = 150f;
-            if (WinterFullTreeDistance > 2500f) WinterFullTreeDistance = 2500f;
+            // Older experimental builds could persist 2500 m here. Applying that
+            // value to real 3D trees causes a severe winter FPS regression.
+            if (WinterFullTreeDistance > 750f) WinterFullTreeDistance = 750f;
             if (WinterFullTreeCount < 100) WinterFullTreeCount = 100;
-            if (WinterFullTreeCount > 5000) WinterFullTreeCount = 5000;
+            if (WinterFullTreeCount > 1200) WinterFullTreeCount = 1200;
+            WinterTreeDistanceMultiplier = 1f;
+            if (WinterDetailDistanceMultiplier <= 0f) WinterDetailDistanceMultiplier = 1.2f;
+            if (WinterDetailDistanceMultiplier < 1f) WinterDetailDistanceMultiplier = 1f;
+            if (WinterDetailDistanceMultiplier > 1.5f) WinterDetailDistanceMultiplier = 1.5f;
+            if (WinterBillboardStartDistance <= 0f) WinterBillboardStartDistance = 180f;
+            if (WinterBillboardStartDistance < 50f) WinterBillboardStartDistance = 50f;
+            if (WinterBillboardStartDistance > 400f) WinterBillboardStartDistance = 400f;
             SeasonalTextureResolution = NormalizeTextureResolution(SeasonalTextureResolution);
             if (TextureUpdatesPerFrame < 1) TextureUpdatesPerFrame = 1;
             if (TextureUpdatesPerFrame > 4) TextureUpdatesPerFrame = 4;

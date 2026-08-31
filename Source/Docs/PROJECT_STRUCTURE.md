@@ -6,10 +6,12 @@ DVSeasons оформлен как самостоятельный публику�
 
 - `DVSeasons.Common` — модель сезона и независимые от Unity контракты. Проект сохраняет runtime-имя сборки `DVSeasons.Core.dll` для обратной совместимости.
 - `DVSeasons.Game` — точка входа Unity Mod Manager, визуальные эффекты, погода, настройки и загрузка ресурсов. Результат проекта — `DVSeasons.dll`.
-- `DVSeasons.MP` — необязательный адаптер MultiplayerAPI. Результат проекта — `DVSeasons.Multiplayer.dll`.
+- `DVSeasons.Game/info.source.json` — исходный манифест; MSBuild копирует его в runtime как единственный `info.json`, поэтому универсальный архив не содержит второго UMM-манифеста внутри `Source`.
+- `DVSeasons.MP` — необязательный адаптер MultiplayerAPI. Результат проекта — `DVSeasons.Multiplayer.dll`; сетевой протокол передаёт полное состояние сезона вместе с длительностью сезона и перехода.
 - `DVSeasons.Unity` — воспроизводимые исходники AssetBundle: `Assets`, `Packages` и `ProjectSettings`.
 - `DVSeasons.Tests` — модульные тесты независимой логики.
-- `Resources/Runtime/AssetBundles` — единственный готовый бинарный ресурс, необходимый runtime-моду.
+- `Resources/Runtime/AssetBundles` — готовый Unity AssetBundle сезонных текстур.
+- `Resources/Runtime/Textures` — отдельные прозрачные runtime-спрайты, включая оригинальный мягкий хлопок снега для системы частиц.
 - `Resources/Reference` — вспомогательные визуальные материалы, которые не попадают в пакет мода.
 - `Tools` — скрипты разработчика. Они не входят в устанавливаемый мод.
 - `Docs` — документация проекта.
@@ -25,4 +27,4 @@ DVSeasons оформлен как самостоятельный публику�
 
 `artifacts`, `bin`, `obj`, Unity `Library`, `Logs`, `Temp`, `UserSettings`, локальный Unity `Build` и генерируемые `Texture2DArray` исключены через `.gitignore`. Их отсутствие не мешает сборке исходников.
 
-Runtime AssetBundle намеренно хранится в `Resources/Runtime`, а не внутри C#-проекта. `DVSeasons.Game.csproj` подключает его как linked content и копирует в правильный путь пакета. Это отделяет код от ресурса без изменения структуры устанавливаемого мода.
+Runtime-ресурсы намеренно хранятся в `Resources/Runtime`, а не внутри C#-проекта. `DVSeasons.Game.csproj` подключает AssetBundle и PNG-спрайт как linked content и копирует их в правильные пути пакета. Это отделяет код от ресурсов без изменения структуры устанавливаемого мода.

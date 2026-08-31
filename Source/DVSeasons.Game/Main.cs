@@ -25,7 +25,8 @@ namespace DVSeasons.Mod
                 entry.OnGUI = OnGui;
                 entry.OnSaveGUI = OnSaveGui;
                 entry.OnUpdate = OnUpdate;
-                entry.Logger.Log("Dynamic Seasons 0.1.2 loaded with automatic Russian/English localization.");
+                entry.OnSessionStart = OnSessionStart;
+                entry.Logger.Log("Dynamic Seasons 0.2.0 loaded with automatic Russian/English localization.");
                 return true;
             }
             catch (Exception exception)
@@ -53,8 +54,8 @@ namespace DVSeasons.Mod
 
         private static bool OnUnload(UnityModManager.ModEntry modEntry)
         {
-            if (runtime != null) runtime.SavePhaseIfAuthoritative();
-            if (settings != null) settings.Save(modEntry);
+            if (runtime != null) runtime.SaveSettings();
+            else if (settings != null) settings.Save(modEntry);
             Cleanup();
             return true;
         }
@@ -66,12 +67,25 @@ namespace DVSeasons.Mod
 
         private static void OnSaveGui(UnityModManager.ModEntry modEntry)
         {
-            if (runtime != null) runtime.SavePhaseIfAuthoritative();
-            settings.Save(modEntry);
+            if (runtime != null) runtime.SaveSettings();
+            else if (settings != null) settings.Save(modEntry);
+        }
+
+        private static void OnSessionStart(UnityModManager.ModEntry modEntry)
+        {
+            try
+            {
+                if (runtime != null) runtime.OnSessionStart();
+            }
+            catch (Exception exception)
+            {
+                modEntry.Logger.LogException(exception);
+            }
         }
 
         private static void OnGui(UnityModManager.ModEntry modEntry)
         {
+            if (settings == null) return;
             settings.Clamp();
             var russian = ModLocalization.IsRussian;
             var state = runtime == null ? null : runtime.CurrentState;
@@ -93,16 +107,54 @@ namespace DVSeasons.Mod
             GUILayout.Label(WeatherStatus(russian));
             GUILayout.Space(8f);
 
+            settings.MuteRainAudioDuringSnow = GUILayout.Toggle(settings.MuteRainAudioDuringSnow,
+                ModLocalization.Text(russian,
+                    "Без звука дождя во время зимнего снегопада",
+                    "Mute rain audio during winter snowfall"));
+            settings.SeasonalPrecipitationEnabled = GUILayout.Toggle(settings.SeasonalPrecipitationEnabled,
+                ModLocalization.Text(russian,
+                    "Сезонная частота и длительность осадков",
+                    "Seasonal precipitation frequency and duration"));
+            settings.DisableWinterThunder = GUILayout.Toggle(settings.DisableWinterThunder,
+                ModLocalization.Text(russian,
+                    "Отключать гром и молнии зимой",
+                    "Disable thunder and lightning in winter"));
+            GUILayout.Space(8f);
+
             settings.AutomaticCycle = GUILayout.Toggle(settings.AutomaticCycle,
                 ModLocalization.Text(russian, "Автоматическая смена сезонов", "Automatic season cycle"));
             GUILayout.Label(ModLocalization.Text(russian, "Дней на сезон: ", "Days per season: ") +
                 ModLocalization.Number(russian, settings.DaysPerSeason, "F0"));
             settings.DaysPerSeason = GUILayout.HorizontalSlider(settings.DaysPerSeason, 1f, 90f);
+            var requestedRandomDuration = GUILayout.Toggle(settings.RandomTransitionDuration,
+                ModLocalization.Text(russian,
+                    "Случайная длительность перехода (1–5 игровых дней)",
+                    "Random transition duration (1–5 game days)"));
+            if (requestedRandomDuration != settings.RandomTransitionDuration)
+            {
+                if (runtime != null) runtime.SetRandomTransitionDuration(requestedRandomDuration);
+                else settings.RandomTransitionDuration = requestedRandomDuration;
+            }
+            var transitionDays = runtime == null ? settings.TransitionDays : runtime.CurrentTransitionDays;
             GUILayout.Label(ModLocalization.Text(russian,
-                "Длительность плавного перехода: ", "Smooth transition duration: ") +
-                ModLocalization.Number(russian, settings.TransitionDays, "F1") +
+                    settings.RandomTransitionDuration ? "Текущая длительность перехода: " :
+                        "Длительность перехода: ",
+                    settings.RandomTransitionDuration ? "Current transition duration: " :
+                        "Transition duration: ") +
+                ModLocalization.Number(russian, transitionDays, "F0") +
                 ModLocalization.Text(russian, " дн.", " days"));
-            settings.TransitionDays = GUILayout.HorizontalSlider(settings.TransitionDays, 0f, settings.DaysPerSeason);
+            var guiWasEnabled = GUI.enabled;
+            GUI.enabled = guiWasEnabled && !settings.RandomTransitionDuration;
+            var maximumTransitionDays = Mathf.Max(1f, Mathf.Min(5f, Mathf.Floor(settings.DaysPerSeason)));
+            var requestedTransitionDays = Mathf.Round(GUILayout.HorizontalSlider(
+                transitionDays, 1f, maximumTransitionDays));
+            GUI.enabled = guiWasEnabled;
+            if (!settings.RandomTransitionDuration &&
+                Mathf.Abs(requestedTransitionDays - settings.TransitionDays) > 0.001f)
+            {
+                if (runtime != null) runtime.SetManualTransitionDays(requestedTransitionDays);
+                else settings.TransitionDays = requestedTransitionDays;
+            }
             GUILayout.BeginHorizontal();
             if (GUILayout.Button(SeasonName(SeasonKind.Spring, russian))) runtime.SetSeason(SeasonKind.Spring);
             if (GUILayout.Button(SeasonName(SeasonKind.Summer, russian))) runtime.SetSeason(SeasonKind.Summer);
@@ -115,10 +167,6 @@ namespace DVSeasons.Mod
             GUILayout.Label(ModLocalization.Text(russian, "Плотность снегопада: ", "Snowfall density: ") +
                 ModLocalization.Number(russian, settings.SnowfallDensity, "F2"));
             settings.SnowfallDensity = GUILayout.HorizontalSlider(settings.SnowfallDensity, 0f, 2f);
-            GUILayout.Label(ModLocalization.Text(russian, "Фоновый зимний снег: ", "Ambient winter snowfall: ") +
-                ModLocalization.Number(russian, settings.AmbientWinterSnowfall, "F2"));
-            settings.AmbientWinterSnowfall = GUILayout.HorizontalSlider(settings.AmbientWinterSnowfall, 0f, 0.25f);
-
             GUILayout.Space(8f);
             GUILayout.Label(ModLocalization.Text(russian, "Эквивалент мокрого рельса: ",
                     "Wet-rail equivalent: ") +
@@ -141,10 +189,10 @@ namespace DVSeasons.Mod
                 return ModLocalization.Text(russian, "Multiplayer доступен — одиночная сессия",
                     "Multiplayer available — single-player session");
             return runtime.IsNetworkAuthority
-                ? ModLocalization.Text(russian, "Multiplayer: хост управляет сезонами",
-                    "Multiplayer: the host controls the seasons")
-                : ModLocalization.Text(russian, "Multiplayer: сезон синхронизирован с хостом",
-                    "Multiplayer: season synchronized with the host");
+                ? ModLocalization.Text(russian, "Multiplayer: хост управляет сезонами и погодой",
+                    "Multiplayer: the host controls seasons and weather")
+                : ModLocalization.Text(russian, "Multiplayer: сезон и погода синхронизированы с хостом",
+                    "Multiplayer: season and weather synchronized with the host");
         }
 
         private static string WeatherStatus(bool russian)
@@ -178,6 +226,7 @@ namespace DVSeasons.Mod
                 entry.OnGUI = null;
                 entry.OnSaveGUI = null;
                 entry.OnUpdate = null;
+                entry.OnSessionStart = null;
             }
             entry = null;
         }

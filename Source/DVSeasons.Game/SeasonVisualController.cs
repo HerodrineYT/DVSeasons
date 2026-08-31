@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using DVSeasons.Core;
 using UnityEngine;
 
@@ -14,11 +15,10 @@ namespace DVSeasons.Mod
             public Material SeasonalMaterial;
             public Color OriginalGrassTint;
             public float OriginalDetailObjectDensity;
+            public float OriginalDetailObjectDistance;
+            public float OriginalTreeDistance;
             public float OriginalTreeBillboardDistance;
             public int OriginalTreeMaximumFullLodCount;
-            public TreeInstance[] OriginalTreeInstances;
-            public int LastTreeColorStep;
-            public bool TreeColorsApplied;
         }
 
         private sealed class RainRecord
@@ -32,21 +32,30 @@ namespace DVSeasons.Mod
         private readonly Dictionary<int, RainRecord> rainSystems = new Dictionary<int, RainRecord>();
         private readonly SeasonalTextureController seasonalTextures;
         private readonly MicroSplatSeasonalTerrainController microSplatTerrain;
+        private readonly SeasonAssetBundleRepository texturePack;
+        private readonly string modPath;
         private GameObject snowObject;
         private ParticleSystem snowSystem;
+        private ParticleSystem.Particle[] snowParticleBuffer;
         private Material snowMaterial;
         private Texture2D snowTexture;
         private float nextTerrainScan;
         private float nextRainScan;
+        private float nextSnowShelterCheck;
+        private float nextCabSnowClear;
+        private bool snowSheltered;
+        private bool cameraInsideCab;
 
         public SeasonVisualController(string modPath)
         {
-            var texturePack = new SeasonAssetBundleRepository(modPath);
+            this.modPath = modPath ?? string.Empty;
+            texturePack = new SeasonAssetBundleRepository(modPath);
             seasonalTextures = new SeasonalTextureController(texturePack);
             microSplatTerrain = new MicroSplatSeasonalTerrainController(texturePack);
         }
 
-        public void Apply(SeasonState state, float rainIntensity, SeasonModSettings settings)
+        public void Apply(SeasonState state, float precipitationSnowAmount, float rainIntensity, Vector3 windVelocity,
+            float snowLightFactor, SeasonModSettings settings)
         {
             if (state == null || settings == null) return;
             ScanTerrains();
@@ -54,11 +63,17 @@ namespace DVSeasons.Mod
             seasonalTextures.Apply(state, settings);
             microSplatTerrain.Apply(state, settings);
             ApplyTerrains(state, settings);
-            ApplyRainCrossfade(settings.ReplaceRainWithSnow ? state.SnowAmount : 0f);
-            ApplySnowfall(state, rainIntensity, settings);
+            ApplyRainCrossfade(settings.ReplaceRainWithSnow ? precipitationSnowAmount : 0f);
+            ApplySnowfall(precipitationSnowAmount, rainIntensity, windVelocity, snowLightFactor, settings);
         }
 
         public void Dispose()
+        {
+            ResetForSession();
+            texturePack.Dispose();
+        }
+
+        public void ResetForSession()
         {
             seasonalTextures.Dispose();
             microSplatTerrain.Dispose();
@@ -68,11 +83,10 @@ namespace DVSeasons.Mod
                 {
                     record.Terrain.materialTemplate = record.OriginalMaterial;
                     record.Terrain.detailObjectDensity = record.OriginalDetailObjectDensity;
+                    record.Terrain.detailObjectDistance = record.OriginalDetailObjectDistance;
+                    record.Terrain.treeDistance = record.OriginalTreeDistance;
                     record.Terrain.treeBillboardDistance = record.OriginalTreeBillboardDistance;
                     record.Terrain.treeMaximumFullLODCount = record.OriginalTreeMaximumFullLodCount;
-                    if (record.TreeColorsApplied && record.Terrain.terrainData != null &&
-                        record.OriginalTreeInstances != null)
-                        record.Terrain.terrainData.treeInstances = record.OriginalTreeInstances;
                     if (record.Terrain.terrainData != null) record.Terrain.terrainData.wavingGrassTint = record.OriginalGrassTint;
                 }
                 if (record.SeasonalMaterial != null) UnityEngine.Object.Destroy(record.SeasonalMaterial);
@@ -85,6 +99,16 @@ namespace DVSeasons.Mod
             if (snowTexture != null) UnityEngine.Object.Destroy(snowTexture);
             snowObject = null;
             snowSystem = null;
+            snowParticleBuffer = null;
+            snowMaterial = null;
+            snowTexture = null;
+            nextTerrainScan = 0f;
+            nextRainScan = 0f;
+            nextSnowShelterCheck = 0f;
+            nextCabSnowClear = 0f;
+            snowSheltered = false;
+            cameraInsideCab = false;
+            texturePack.ResetForSession();
         }
 
         private void ScanTerrains()
@@ -106,10 +130,10 @@ namespace DVSeasons.Mod
                     SeasonalMaterial = seasonal,
                     OriginalGrassTint = terrain.terrainData == null ? Color.white : terrain.terrainData.wavingGrassTint,
                     OriginalDetailObjectDensity = terrain.detailObjectDensity,
+                    OriginalDetailObjectDistance = terrain.detailObjectDistance,
+                    OriginalTreeDistance = terrain.treeDistance,
                     OriginalTreeBillboardDistance = terrain.treeBillboardDistance,
-                    OriginalTreeMaximumFullLodCount = terrain.treeMaximumFullLODCount,
-                    OriginalTreeInstances = terrain.terrainData == null ? null : terrain.terrainData.treeInstances,
-                    LastTreeColorStep = -1
+                    OriginalTreeMaximumFullLodCount = terrain.treeMaximumFullLODCount
                 });
             }
         }
@@ -117,7 +141,7 @@ namespace DVSeasons.Mod
         private void ScanRainSystems()
         {
             if (Time.realtimeSinceStartup < nextRainScan) return;
-            nextRainScan = Time.realtimeSinceStartup + 3f;
+            nextRainScan = Time.realtimeSinceStartup + 15f;
             var systems = UnityEngine.Object.FindObjectsOfType<ParticleSystem>();
             for (var i = 0; i < systems.Length; i++)
             {
@@ -137,85 +161,74 @@ namespace DVSeasons.Mod
 
         private void ApplyTerrains(SeasonState state, SeasonModSettings settings)
         {
-            var seasonalTint = GetSeasonTint(state);
+            // Terrain and vegetation setters can make Unity rebuild large native
+            // buffers. Quantizing the visual state prevents those rebuilds on every
+            // frame while keeping 32 visually smooth steps over several game days.
+            var seasonalTint = GetSeasonTint(state, 32);
             var tintStrength = Mathf.Clamp01(settings.FoliageTintStrength);
-            var snow = settings.GroundSnowEnabled ? Mathf.Clamp01(state.SnowAmount * settings.GroundSnowStrength) : 0f;
+            var snowCoverage = settings.GroundSnowEnabled
+                ? Mathf.Clamp01(state.SnowAmount * settings.GroundSnowStrength * settings.TextureChangeStrength)
+                : 0f;
+            var proceduralSnow = Quantize01(SnowCoverProfile.GetProceduralAmount(snowCoverage), 32);
             foreach (var record in terrains.Values)
             {
                 if (record.Terrain == null) continue;
                 if (record.Terrain.terrainData != null)
-                    record.Terrain.terrainData.wavingGrassTint = Color.Lerp(record.OriginalGrassTint,
+                {
+                    var grassTint = Color.Lerp(record.OriginalGrassTint,
                         Multiply(record.OriginalGrassTint, seasonalTint), tintStrength);
+                    if (!Approximately(record.Terrain.terrainData.wavingGrassTint, grassTint))
+                        record.Terrain.terrainData.wavingGrassTint = grassTint;
+                }
+                var thawing = state.Current == SeasonKind.Winter && state.Next == SeasonKind.Spring;
+                var vegetationSnow = Mathf.Clamp01(state.SnowAmount * settings.TextureChangeStrength);
                 var winterClearing = settings.SeasonalTexturesEnabled && settings.VegetationTextureChanges
-                    ? Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(state.SnowAmount * settings.TextureChangeStrength))
+                    ? SnowCoverProfile.GetVegetationWinterWeight(vegetationSnow, thawing)
                     : 0f;
-                record.Terrain.detailObjectDensity = Mathf.Lerp(record.OriginalDetailObjectDensity,
+                winterClearing = Quantize01(winterClearing, 16);
+                var detailDensity = Mathf.Lerp(record.OriginalDetailObjectDensity,
                     record.OriginalDetailObjectDensity * 0.08f, winterClearing);
+                if (Mathf.Abs(record.Terrain.detailObjectDensity - detailDensity) > 0.001f)
+                    record.Terrain.detailObjectDensity = detailDensity;
                 var leaflessDistanceWeight = settings.LeaflessDistantTrees ? winterClearing : 0f;
-                record.Terrain.treeBillboardDistance = Mathf.Lerp(record.OriginalTreeBillboardDistance,
-                    Mathf.Max(record.OriginalTreeBillboardDistance, settings.WinterFullTreeDistance),
+                var detailDistance = Mathf.Lerp(record.OriginalDetailObjectDistance,
+                    Mathf.Max(record.OriginalDetailObjectDistance,
+                        Mathf.Min(500f, record.OriginalDetailObjectDistance *
+                            settings.WinterDetailDistanceMultiplier)), leaflessDistanceWeight);
+                if (Mathf.Abs(record.Terrain.detailObjectDistance - detailDistance) > 0.01f)
+                    record.Terrain.detailObjectDistance = detailDistance;
+                // Keep exactly the game's summer tree range and instance placement.
+                // Winter changes only the 3D-to-billboard switch, so every distant
+                // summer tree has a leafless silhouette at the same coordinates.
+                var treeDistance = record.OriginalTreeDistance;
+                if (Mathf.Abs(record.Terrain.treeDistance - treeDistance) > 0.01f)
+                    record.Terrain.treeDistance = treeDistance;
+                // Keep the real leafless tree mesh through the middle distance. This
+                // gives the player the original trunk and branch geometry instead of
+                // a low-resolution crown-shaped billboard around lakes and valleys.
+                var billboardDistance = Mathf.Lerp(record.OriginalTreeBillboardDistance,
+                    Mathf.Max(record.OriginalTreeBillboardDistance,
+                        settings.WinterFullTreeDistance),
                     leaflessDistanceWeight);
-                record.Terrain.treeMaximumFullLODCount = Mathf.RoundToInt(Mathf.Lerp(
+                if (Mathf.Abs(record.Terrain.treeBillboardDistance - billboardDistance) > 0.01f)
+                    record.Terrain.treeBillboardDistance = billboardDistance;
+                var fullTreeCount = Mathf.RoundToInt(Mathf.Lerp(
                     record.OriginalTreeMaximumFullLodCount,
-                    Mathf.Max(record.OriginalTreeMaximumFullLodCount, settings.WinterFullTreeCount),
+                    Mathf.Max(record.OriginalTreeMaximumFullLodCount,
+                        settings.WinterFullTreeCount),
                     leaflessDistanceWeight));
-                ApplyTreeColors(record, winterClearing);
-                ApplySnowProperties(record.SeasonalMaterial, record.OriginalMaterial, snow);
+                if (record.Terrain.treeMaximumFullLODCount != fullTreeCount)
+                    record.Terrain.treeMaximumFullLODCount = fullTreeCount;
+                ApplySnowProperties(record.SeasonalMaterial, record.OriginalMaterial, proceduralSnow);
             }
-        }
-
-        private static void ApplyTreeColors(TerrainRecord record, float winterWeight)
-        {
-            var data = record.Terrain == null ? null : record.Terrain.terrainData;
-            var originals = record.OriginalTreeInstances;
-            if (data == null || originals == null || originals.Length == 0) return;
-            var step = Mathf.RoundToInt(Mathf.Clamp01(winterWeight) * 16f);
-            if (record.LastTreeColorStep == step) return;
-            record.LastTreeColorStep = step;
-            var blend = step / 16f;
-            var prototypes = data.treePrototypes;
-            var output = new TreeInstance[originals.Length];
-            for (var i = 0; i < originals.Length; i++)
-            {
-                var instance = originals[i];
-                var prototypeName = string.Empty;
-                if (instance.prototypeIndex >= 0 && instance.prototypeIndex < prototypes.Length &&
-                    prototypes[instance.prototypeIndex] != null &&
-                    prototypes[instance.prototypeIndex].prefab != null)
-                    prototypeName = prototypes[instance.prototypeIndex].prefab.name;
-                var evergreen = ContainsAny(prototypeName, "fir", "pine", "spruce", "conifer", "cedar");
-                var baseColor = (Color)instance.color;
-                var baseLightmap = (Color)instance.lightmapColor;
-                var luminance = baseColor.r * 0.30f + baseColor.g * 0.59f + baseColor.b * 0.11f;
-                var target = evergreen
-                    ? new Color(baseColor.r * 0.68f + 0.08f, baseColor.g * 0.76f + 0.10f,
-                        baseColor.b * 0.82f + 0.16f, baseColor.a)
-                    : new Color(luminance * 0.58f + 0.24f, luminance * 0.62f + 0.27f,
-                        luminance * 0.68f + 0.32f, baseColor.a);
-                var lightTarget = new Color(target.r, target.g, target.b, target.a);
-                instance.color = Color.Lerp(baseColor, target, blend);
-                instance.lightmapColor = Color.Lerp(baseLightmap, lightTarget, blend);
-                output[i] = instance;
-            }
-            data.treeInstances = output;
-            record.TreeColorsApplied = step > 0;
-        }
-
-        private static bool ContainsAny(string value, params string[] fragments)
-        {
-            if (string.IsNullOrEmpty(value)) return false;
-            for (var i = 0; i < fragments.Length; i++)
-                if (value.IndexOf(fragments[i], StringComparison.OrdinalIgnoreCase) >= 0) return true;
-            return false;
         }
 
         private static void ApplySnowProperties(Material material, Material original, float snow)
         {
             if (material == null) return;
-            // The bundled MicroSplat diffuse array already contains the seasonal ground.
-            // Enabling MicroSplat's procedural snow at the same time creates isolated
-            // slope/noise patches on top of that array, which looks like square chunks.
-            if (material.HasProperty("_Diffuse") && material.GetTexture("_Diffuse") is Texture2DArray) return;
+            // The smooth DVSeasons array already contains its own irregular snow mask.
+            // Reset optional shader snow to avoid stacking a second effect over it.
+            if (UsesBakedWinterArray(material)) snow = 0f;
             SetFloat(material, original, "_Snow_Amount", snow);
             SetFloat(material, original, "_SnowAmount", snow);
             SetFloat(material, original, "_SnowBlendFactor", snow);
@@ -226,11 +239,22 @@ namespace DVSeasons.Mod
             else material.DisableKeyword("_USESNOW_ON");
         }
 
+        private static bool UsesBakedWinterArray(Material material)
+        {
+            if (!material.HasProperty("_Diffuse")) return false;
+            var texture = material.GetTexture("_Diffuse") as Texture2DArray;
+            return texture != null && !string.IsNullOrEmpty(texture.name) &&
+                texture.name.IndexOf("DVSeasons", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                texture.name.IndexOf("Terrain", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
         private static void SetFloat(Material material, Material original, string property, float snow)
         {
             if (!material.HasProperty(property)) return;
             var baseline = original != null && original.HasProperty(property) ? original.GetFloat(property) : 0f;
-            material.SetFloat(property, Mathf.Max(baseline, snow));
+            var value = Mathf.Max(baseline, snow);
+            if (Mathf.Abs(material.GetFloat(property) - value) > 0.001f)
+                material.SetFloat(property, value);
         }
 
         private void ApplyRainCrossfade(float snowAmount)
@@ -253,25 +277,136 @@ namespace DVSeasons.Mod
             emission.rateOverDistanceMultiplier = record.RateOverDistanceMultiplier;
         }
 
-        private void ApplySnowfall(SeasonState state, float rainIntensity, SeasonModSettings settings)
+        private void ApplySnowfall(float precipitationSnowAmount, float rainIntensity, Vector3 windVelocity,
+            float snowLightFactor, SeasonModSettings settings)
         {
-            var precipitation = Mathf.Max(rainIntensity, settings.AmbientWinterSnowfall * state.SnowAmount);
-            var intensity = settings.SnowParticlesEnabled ? state.SnowAmount * precipitation * settings.SnowfallDensity : 0f;
+            var visibility = SnowCoverProfile.GetSnowfallVisibility(precipitationSnowAmount);
+            // Snow is emitted only when the native game weather reports rain. The
+            // old ambient minimum could create snowfall in otherwise dry weather.
+            var precipitation = rainIntensity;
+            var intensity = settings.SnowParticlesEnabled
+                ? visibility * precipitation * settings.SnowfallDensity
+                : 0f;
             if (intensity <= 0.0001f)
             {
                 if (snowSystem != null)
                 {
                     var off = snowSystem.emission;
                     off.rateOverTimeMultiplier = 0f;
+                    if (snowSystem.isPlaying)
+                        snowSystem.Stop(false, ParticleSystemStopBehavior.StopEmittingAndClear);
                 }
                 return;
             }
             EnsureSnowSystem();
             var camera = Camera.main;
-            if (camera != null) snowObject.transform.position = camera.transform.position + (Vector3.up * 12f);
+            if (camera == null) return;
+            ApplySnowWind(windVelocity);
+            ApplySnowLighting(snowLightFactor);
+            UpdateSnowShelter(camera);
+            if (snowSheltered)
+            {
+                var shelteredEmission = snowSystem.emission;
+                shelteredEmission.rateOverTimeMultiplier = 0f;
+                if (snowSystem.isPlaying)
+                    snowSystem.Stop(false, ParticleSystemStopBehavior.StopEmittingAndClear);
+                return;
+            }
+            PositionSnowEmitter(camera, windVelocity);
             var emission = snowSystem.emission;
-            emission.rateOverTimeMultiplier = 1800f * intensity;
+            emission.rateOverTimeMultiplier = 1600f * intensity;
             if (!snowSystem.isPlaying) snowSystem.Play();
+        }
+
+        private void UpdateSnowShelter(Camera camera)
+        {
+            if (camera == null || Time.realtimeSinceStartup < nextSnowShelterCheck) return;
+            nextSnowShelterCheck = Time.realtimeSinceStartup + 0.20f;
+            var forward = HorizontalForward(camera.transform);
+            cameraInsideCab = HasRoof(camera.transform.position, 3.25f);
+            var firstProbe = camera.transform.position + (forward * 9f) + (Vector3.up * 0.4f);
+            var secondProbe = camera.transform.position + (forward * 22f) + (Vector3.up * 0.4f);
+            snowSheltered = HasRoof(firstProbe, 12f) && HasRoof(secondProbe, 16f);
+        }
+
+        private void PositionSnowEmitter(Camera camera, Vector3 windVelocity)
+        {
+            var forward = HorizontalForward(camera.transform);
+            var forwardOffset = cameraInsideCab ? 24f : 12f;
+            // Spawn upwind so strong crosswinds still carry flakes through the
+            // visible volume instead of immediately blowing them away from camera.
+            var upwindOffset = -Vector3.ClampMagnitude(windVelocity * 2.4f, 26f);
+            snowObject.transform.position = camera.transform.position + (forward * forwardOffset) +
+                upwindOffset + (Vector3.up * 8f);
+            snowObject.transform.rotation = Quaternion.LookRotation(forward, Vector3.up);
+            var shape = snowSystem.shape;
+            shape.scale = cameraInsideCab
+                ? new Vector3(70f, 18f, 34f)
+                : new Vector3(80f, 18f, 60f);
+            if (cameraInsideCab && Time.realtimeSinceStartup >= nextCabSnowClear)
+            {
+                nextCabSnowClear = Time.realtimeSinceStartup + 0.30f;
+                ClearSnowNearCamera(camera.transform.position, 4.5f);
+            }
+        }
+
+        private void ApplySnowWind(Vector3 windVelocity)
+        {
+            if (snowSystem == null) return;
+            var velocity = snowSystem.velocityOverLifetime;
+            velocity.x = new ParticleSystem.MinMaxCurve(windVelocity.x - 0.35f,
+                windVelocity.x + 0.35f);
+            velocity.y = new ParticleSystem.MinMaxCurve(-4.5f, -2.2f);
+            velocity.z = new ParticleSystem.MinMaxCurve(windVelocity.z - 0.35f,
+                windVelocity.z + 0.35f);
+
+            var windStrength = Mathf.Clamp01(windVelocity.magnitude / 12f);
+            var noise = snowSystem.noise;
+            noise.strength = Mathf.Lerp(0.45f, 1.1f, windStrength);
+            noise.frequency = Mathf.Lerp(0.18f, 0.34f, windStrength);
+            noise.scrollSpeed = Mathf.Lerp(0.14f, 0.55f, windStrength);
+        }
+
+        private void ApplySnowLighting(float lightFactor)
+        {
+            if (snowMaterial == null) return;
+            lightFactor = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(lightFactor));
+            var brightness = Mathf.Lerp(0.20f, 1f, lightFactor);
+            var tint = new Color(brightness * 0.86f, brightness * 0.92f,
+                brightness, 1f);
+            if (snowMaterial.HasProperty("_TintColor")) snowMaterial.SetColor("_TintColor", tint);
+            if (snowMaterial.HasProperty("_Color")) snowMaterial.SetColor("_Color", tint);
+        }
+
+        private void ClearSnowNearCamera(Vector3 cameraPosition, float radius)
+        {
+            var particleCount = snowSystem == null ? 0 : snowSystem.particleCount;
+            if (particleCount <= 0) return;
+            if (snowParticleBuffer == null || snowParticleBuffer.Length < particleCount)
+                snowParticleBuffer = new ParticleSystem.Particle[Mathf.NextPowerOfTwo(particleCount)];
+            var count = snowSystem.GetParticles(snowParticleBuffer);
+            var radiusSquared = radius * radius;
+            var changed = false;
+            for (var i = 0; i < count; i++)
+            {
+                if ((snowParticleBuffer[i].position - cameraPosition).sqrMagnitude > radiusSquared) continue;
+                snowParticleBuffer[i].remainingLifetime = 0f;
+                changed = true;
+            }
+            if (changed) snowSystem.SetParticles(snowParticleBuffer, count);
+        }
+
+        private static Vector3 HorizontalForward(Transform cameraTransform)
+        {
+            var forward = Vector3.ProjectOnPlane(cameraTransform.forward, Vector3.up);
+            return forward.sqrMagnitude > 0.001f ? forward.normalized : Vector3.forward;
+        }
+
+        private static bool HasRoof(Vector3 origin, float distance)
+        {
+            RaycastHit hit;
+            return Physics.Raycast(origin, Vector3.up, out hit, distance,
+                Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
         }
 
         private void EnsureSnowSystem()
@@ -281,60 +416,157 @@ namespace DVSeasons.Mod
             snowSystem = snowObject.AddComponent<ParticleSystem>();
             var main = snowSystem.main;
             main.loop = true;
+            main.prewarm = true;
             main.simulationSpace = ParticleSystemSimulationSpace.World;
-            main.startLifetime = new ParticleSystem.MinMaxCurve(7f, 11f);
-            main.startSpeed = new ParticleSystem.MinMaxCurve(2.5f, 5f);
-            main.startSize = new ParticleSystem.MinMaxCurve(0.035f, 0.13f);
-            main.startColor = new ParticleSystem.MinMaxGradient(new Color(0.92f, 0.96f, 1f, 0.9f), Color.white);
+            main.cullingMode = ParticleSystemCullingMode.AlwaysSimulate;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(4f, 6.5f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(0f, 0.4f);
+            main.startSize = new ParticleSystem.MinMaxCurve(0.05f, 0.17f);
+            main.startColor = new ParticleSystem.MinMaxGradient(new Color(0.94f, 0.97f, 1f, 0.95f), Color.white);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, Mathf.PI * 2f);
             main.gravityModifier = 0.04f;
-            main.maxParticles = 7000;
+            main.maxParticles = 7500;
             var shape = snowSystem.shape;
             shape.shapeType = ParticleSystemShapeType.Box;
-            shape.scale = new Vector3(55f, 5f, 55f);
+            shape.scale = new Vector3(80f, 18f, 80f);
             var velocity = snowSystem.velocityOverLifetime;
             velocity.enabled = true;
             velocity.space = ParticleSystemSimulationSpace.World;
             velocity.x = new ParticleSystem.MinMaxCurve(-0.35f, 0.35f);
-            velocity.y = new ParticleSystem.MinMaxCurve(-0.5f, -0.1f);
+            velocity.y = new ParticleSystem.MinMaxCurve(-4.5f, -2.2f);
             velocity.z = new ParticleSystem.MinMaxCurve(-0.35f, 0.35f);
             var noise = snowSystem.noise;
             noise.enabled = true;
+            noise.quality = ParticleSystemNoiseQuality.Low;
             noise.strength = 0.55f;
             noise.frequency = 0.22f;
             noise.scrollSpeed = 0.18f;
+            var rotation = snowSystem.rotationOverLifetime;
+            rotation.enabled = true;
+            rotation.z = new ParticleSystem.MinMaxCurve(-0.55f, 0.55f);
+            // Per-particle world collision was the largest continuous CPU cost. The
+            // flakes already live only a few seconds in a camera-relative volume, so
+            // collision adds little visually while testing thousands of particles
+            // against terrain and trains every frame.
+            var collision = snowSystem.collision;
+            collision.enabled = false;
             var renderer = snowObject.GetComponent<ParticleSystemRenderer>();
-            var shader = Shader.Find("Particles/Standard Unlit") ?? Shader.Find("Legacy Shaders/Particles/Alpha Blended");
+            var shader = Shader.Find("Legacy Shaders/Particles/Alpha Blended") ??
+                Shader.Find("Particles/Standard Unlit") ?? Shader.Find("Sprites/Default");
             if (shader != null)
             {
-                snowTexture = CreateSnowTexture();
+                var usesAtlas = false;
+                snowTexture = LoadOrCreateSnowTexture(out usesAtlas);
                 snowMaterial = new Material(shader) { name = "DVSeasons Snow Material", mainTexture = snowTexture };
+                if (snowMaterial.HasProperty("_TintColor")) snowMaterial.SetColor("_TintColor", Color.white);
+                if (snowMaterial.HasProperty("_Color")) snowMaterial.SetColor("_Color", Color.white);
                 renderer.material = snowMaterial;
+                if (usesAtlas)
+                {
+                    var textureSheet = snowSystem.textureSheetAnimation;
+                    textureSheet.enabled = true;
+                    textureSheet.mode = ParticleSystemAnimationMode.Grid;
+                    textureSheet.numTilesX = 4;
+                    textureSheet.numTilesY = 4;
+                    textureSheet.animation = ParticleSystemAnimationType.WholeSheet;
+                    textureSheet.frameOverTime = new ParticleSystem.MinMaxCurve(0f);
+                    textureSheet.startFrame = new ParticleSystem.MinMaxCurve(0f, 0.999f);
+                    textureSheet.cycleCount = 1;
+                }
             }
             renderer.renderMode = ParticleSystemRenderMode.Billboard;
+            renderer.cameraVelocityScale = 0.12f;
         }
 
-        private static Texture2D CreateSnowTexture()
+        private Texture2D LoadOrCreateSnowTexture(out bool usesAtlas)
         {
-            const int size = 32;
-            var texture = new Texture2D(size, size, TextureFormat.ARGB32, false) { name = "DVSeasons Snowflake" };
+            var atlasPath = Path.Combine(modPath, "Textures", "snowflake_variations.png");
+            var path = File.Exists(atlasPath)
+                ? atlasPath
+                : Path.Combine(modPath, "Textures", "snowflake_realistic.png");
+            usesAtlas = string.Equals(path, atlasPath, StringComparison.OrdinalIgnoreCase);
+            if (File.Exists(path))
+            {
+                Texture2D loaded = null;
+                try
+                {
+                    loaded = new Texture2D(2, 2, TextureFormat.RGBA32, true)
+                    {
+                        name = "DVSeasons Irregular Snow Flake",
+                        filterMode = FilterMode.Trilinear,
+                        wrapMode = TextureWrapMode.Clamp,
+                        hideFlags = HideFlags.HideAndDontSave
+                    };
+                    if (ImageConversion.LoadImage(loaded, File.ReadAllBytes(path), true)) return loaded;
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogWarning("[DVSeasons] Realistic snow particle texture could not be loaded: " +
+                        exception.Message);
+                }
+                if (loaded != null) UnityEngine.Object.Destroy(loaded);
+            }
+            usesAtlas = false;
+            return CreateFallbackSnowTexture();
+        }
+
+        private static Texture2D CreateFallbackSnowTexture()
+        {
+            const int size = 64;
+            var texture = new Texture2D(size, size, TextureFormat.RGBA32, false)
+            {
+                name = "DVSeasons Six-Arm Snowflake",
+                filterMode = FilterMode.Bilinear,
+                wrapMode = TextureWrapMode.Clamp,
+                hideFlags = HideFlags.HideAndDontSave
+            };
             var pixels = new Color[size * size];
             for (var y = 0; y < size; y++)
             for (var x = 0; x < size; x++)
             {
                 var dx = ((x + 0.5f) / size * 2f) - 1f;
                 var dy = ((y + 0.5f) / size * 2f) - 1f;
-                var alpha = Mathf.Clamp01(1f - Mathf.Sqrt((dx * dx) + (dy * dy)));
-                alpha *= alpha;
-                pixels[(y * size) + x] = new Color(1f, 1f, 1f, alpha);
+                var radius = Mathf.Sqrt((dx * dx) + (dy * dy));
+                var alpha = Mathf.Clamp01((0.16f - radius) * 9f);
+                for (var arm = 0; arm < 3; arm++)
+                {
+                    var angle = arm * Mathf.PI / 3f;
+                    var along = Mathf.Abs((dx * Mathf.Cos(angle)) + (dy * Mathf.Sin(angle)));
+                    var across = Mathf.Abs((-dx * Mathf.Sin(angle)) + (dy * Mathf.Cos(angle)));
+                    var line = Mathf.Clamp01((0.052f - across) * 24f) *
+                        Mathf.Clamp01((0.94f - along) * 8f);
+                    alpha = Mathf.Max(alpha, line);
+
+                    for (var branch = 1; branch <= 2; branch++)
+                    {
+                        var branchOrigin = branch * 0.28f;
+                        var branchLength = 0.24f;
+                        var localAlong = along - branchOrigin;
+                        if (localAlong < 0f || localAlong > branchLength) continue;
+                        var branchAcross = Mathf.Abs(across - (localAlong * 0.58f));
+                        var branchLine = Mathf.Clamp01((0.045f - branchAcross) * 25f) *
+                            Mathf.Clamp01((branchLength - localAlong) * 10f);
+                        alpha = Mathf.Max(alpha, branchLine);
+                    }
+                }
+                alpha *= Mathf.Clamp01((1f - radius) * 5f);
+                pixels[(y * size) + x] = new Color(0.92f, 0.97f, 1f, alpha);
             }
             texture.SetPixels(pixels);
             texture.Apply(false, true);
             return texture;
         }
 
-        private static Color GetSeasonTint(SeasonState state)
+        private static Color GetSeasonTint(SeasonState state, int steps)
         {
-            return Color.Lerp(ProfileTint(state.Current), ProfileTint(state.Next), state.Transition);
+            return Color.Lerp(ProfileTint(state.Current), ProfileTint(state.Next),
+                Quantize01(state.Transition, steps));
+        }
+
+        private static float Quantize01(float value, int steps)
+        {
+            if (steps <= 0) return Mathf.Clamp01(value);
+            return Mathf.RoundToInt(Mathf.Clamp01(value) * steps) / (float)steps;
         }
 
         private static Color ProfileTint(SeasonKind season)
@@ -342,7 +574,7 @@ namespace DVSeasons.Mod
             switch (season)
             {
                 case SeasonKind.Spring: return new Color(0.78f, 1.08f, 0.76f);
-                case SeasonKind.Autumn: return new Color(1.18f, 0.58f, 0.24f);
+                case SeasonKind.Autumn: return new Color(1.30f, 0.62f, 0.18f);
                 case SeasonKind.Winter: return new Color(1.2f, 1.25f, 1.32f);
                 default: return Color.white;
             }
@@ -351,6 +583,12 @@ namespace DVSeasons.Mod
         private static Color Multiply(Color a, Color b)
         {
             return new Color(a.r * b.r, a.g * b.g, a.b * b.b, a.a);
+        }
+
+        private static bool Approximately(Color a, Color b)
+        {
+            return Mathf.Abs(a.r - b.r) < 0.001f && Mathf.Abs(a.g - b.g) < 0.001f &&
+                Mathf.Abs(a.b - b.b) < 0.001f && Mathf.Abs(a.a - b.a) < 0.001f;
         }
     }
 }

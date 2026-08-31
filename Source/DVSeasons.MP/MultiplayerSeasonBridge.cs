@@ -20,6 +20,9 @@ namespace DVSeasons.Multiplayer
         private float nextBroadcastTime;
         private float nextRequestTime;
         private SeasonNetworkState lastState;
+        private bool receivedStateLogged;
+        private bool precipitationStateLogged;
+        private bool lastPrecipitationActive;
 
         public bool IsAvailable { get { return MultiplayerAPI.IsMultiplayerLoaded; } }
         public bool IsSessionActive
@@ -37,7 +40,7 @@ namespace DVSeasons.Multiplayer
             {
                 if (!IsAvailable) return "Multiplayer не установлен — локальный режим";
                 if (!IsSessionActive) return "Multiplayer доступен — одиночная сессия";
-                return IsAuthority ? "Multiplayer: хост управляет сезонами" : "Multiplayer: сезон синхронизирован с хостом";
+                return IsAuthority ? "Multiplayer: хост управляет сезонами и погодой" : "Multiplayer: сезон и погода синхронизированы с хостом";
             }
         }
 
@@ -68,7 +71,9 @@ namespace DVSeasons.Multiplayer
             if (!enabled || disposed || state == null || !IsSessionActive || !IsAuthority || MultiplayerAPI.Server == null) return;
             lastState = Copy(state);
             if (!force && Time.realtimeSinceStartup < nextBroadcastTime) return;
-            nextBroadcastTime = Time.realtimeSinceStartup + 5f;
+            // Weather-editor changes need to reach clients quickly enough that the
+            // first visible flakes do not lag several seconds behind the host.
+            nextBroadcastTime = Time.realtimeSinceStartup + 1f;
             SendToAll();
         }
 
@@ -95,7 +100,7 @@ namespace DVSeasons.Multiplayer
         }
 
         private void OnServerStarted(IServer server) { serverRegistered = false; ConfigureCompatibility(); RegisterServer(server); }
-        private void OnClientStarted(IClient client) { clientRegistered = false; lastReceivedSequence = 0; nextRequestTime = 0f; ConfigureCompatibility(); RegisterClient(client); if (enabled) RequestState(); }
+        private void OnClientStarted(IClient client) { clientRegistered = false; lastReceivedSequence = 0; nextRequestTime = 0f; receivedStateLogged = false; precipitationStateLogged = false; ConfigureCompatibility(); RegisterClient(client); if (enabled) RequestState(); }
         private void OnServerStopped() { serverRegistered = false; sequence = 0; lastState = null; }
         private void OnClientStopped() { clientRegistered = false; lastReceivedSequence = 0; }
 
@@ -105,6 +110,7 @@ namespace DVSeasons.Multiplayer
             serverRegistered = true;
             server.RegisterSerializablePacket<SeasonStateRequestPacket>(OnStateRequested);
             server.OnPlayerReady += OnPlayerReady;
+            Debug.Log("[DVSeasons MP] Server packet handler registered (protocol " + SeasonNetworkState.CurrentProtocol + ").");
         }
 
         private void RegisterClient(IClient client)
@@ -112,6 +118,7 @@ namespace DVSeasons.Multiplayer
             if (clientRegistered || client == null) return;
             clientRegistered = true;
             client.RegisterSerializablePacket<SeasonStatePacket>(OnStatePacket);
+            Debug.Log("[DVSeasons MP] Client packet handler registered (protocol " + SeasonNetworkState.CurrentProtocol + ").");
         }
 
         private void ConfigureCompatibility()
@@ -121,7 +128,12 @@ namespace DVSeasons.Multiplayer
 
         private void OnStateRequested(SeasonStateRequestPacket request, IPlayer player)
         {
-            if (!enabled || request == null || request.Protocol != SeasonNetworkState.CurrentProtocol) return;
+            if (!enabled || request == null) return;
+            if (request.Protocol != SeasonNetworkState.CurrentProtocol)
+            {
+                Debug.LogWarning("[DVSeasons MP] Ignored season request with incompatible protocol " + request.Protocol + ".");
+                return;
+            }
             SendToPlayer(player);
         }
 
@@ -129,9 +141,35 @@ namespace DVSeasons.Multiplayer
 
         private void OnStatePacket(SeasonStatePacket packet)
         {
-            if (!enabled || packet == null || packet.State == null || !packet.State.IsValid()) return;
+            if (!enabled || packet == null || packet.State == null) return;
+            if (!packet.State.IsValid())
+            {
+                Debug.LogWarning("[DVSeasons MP] Ignored invalid season state (protocol " + packet.State.Protocol +
+                    ", days " + packet.State.DaysPerSeason + ", transition season " +
+                    packet.State.TransitionSeason + ", transition days " +
+                    packet.State.TransitionDays + ").");
+                return;
+            }
             if (packet.State.Sequence <= lastReceivedSequence) return;
             lastReceivedSequence = packet.State.Sequence;
+            if (!receivedStateLogged)
+            {
+                receivedStateLogged = true;
+                Debug.Log("[DVSeasons MP] Host season state received: " + packet.State.Current + " -> " +
+                    packet.State.Next + ", transition " + (packet.State.Transition * 100f).ToString("F0") +
+                    "%, selected duration " + packet.State.TransitionDays.ToString("F0") +
+                    " day(s) for season " + packet.State.TransitionSeason + ", rain " +
+                    packet.State.RainIntensity.ToString("F2") + ".");
+            }
+            var precipitationActive = packet.State.RainIntensity > 0.01f;
+            if (!precipitationStateLogged || precipitationActive != lastPrecipitationActive)
+            {
+                precipitationStateLogged = true;
+                lastPrecipitationActive = precipitationActive;
+                Debug.Log("[DVSeasons MP] Host precipitation " +
+                    (precipitationActive ? "started" : "stopped") + " (rain " +
+                    packet.State.RainIntensity.ToString("F2") + ").");
+            }
             var handler = StateReceived;
             if (handler != null) handler(packet.State);
         }
@@ -163,7 +201,15 @@ namespace DVSeasons.Multiplayer
                 Transition = source.Transition,
                 SnowAmount = source.SnowAmount,
                 TemperatureCelsius = source.TemperatureCelsius,
-                WinterWetnessEquivalent = source.WinterWetnessEquivalent
+                WinterWetnessEquivalent = source.WinterWetnessEquivalent,
+                DaysPerSeason = source.DaysPerSeason,
+                RandomTransitionDuration = source.RandomTransitionDuration,
+                TransitionDays = source.TransitionDays,
+                TransitionSeason = source.TransitionSeason,
+                RainIntensity = source.RainIntensity,
+                WindVelocityX = source.WindVelocityX,
+                WindVelocityZ = source.WindVelocityZ,
+                SnowLightFactor = source.SnowLightFactor
             };
         }
     }

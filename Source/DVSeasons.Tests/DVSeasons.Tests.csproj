@@ -6,4 +6,12 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5"><PrivateAssets>all</PrivateAssets></PackageReference>
   </ItemGroup>
   <ItemGroup><ProjectReference Include="..\DVSeasons.Common\DVSeasons.Common.csproj" /></ItemGroup>
+  <ItemGroup>
+    <!-- Exercise the production session lifecycle without loading a Unity player.
+         Only the engine/network boundaries are replaced by deterministic doubles. -->
+    <Compile Include="..\DVSeasons.Game\SeasonRuntime.cs" Link="Runtime\SeasonRuntime.cs" />
+    <Compile Include="..\DVSeasons.Game\SeasonModSettings.cs" Link="Runtime\SeasonModSettings.cs" />
+    <Compile Include="..\DVSeasons.Game\SeasonSaveData.cs" Link="Runtime\SeasonSaveData.cs" />
+    <Compile Include="..\DVSeasons.Game\OfflineSeasonBridge.cs" Link="Runtime\OfflineSeasonBridge.cs" />
+  </ItemGroup>
 </Project>
