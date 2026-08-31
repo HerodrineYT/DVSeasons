@@ -5,6 +5,8 @@
     <RootNamespace>DVSeasons.Mod</RootNamespace>
     <Version>0.2.0</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <DVSeasonsRuntimeResources Condition="'$(DVSeasonsRuntimeResources)' == '' and Exists('$(MSBuildProjectDirectory)\..\Resources\Runtime\AssetBundles\dvseasons_dv99')">$(MSBuildProjectDirectory)\..\Resources\Runtime</DVSeasonsRuntimeResources>
+    <DVSeasonsRuntimeResources Condition="'$(DVSeasonsRuntimeResources)' == '' and Exists('$(MSBuildProjectDirectory)\..\..\AssetBundles\dvseasons_dv99')">$(MSBuildProjectDirectory)\..\..</DVSeasonsRuntimeResources>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\DVSeasons.Common\DVSeasons.Common.csproj" />
@@ -31,19 +33,19 @@
     <None Include="info.source.json"
           Link="info.json"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\Resources\Runtime\AssetBundles\dvseasons_dv99"
+    <None Include="$(DVSeasonsRuntimeResources)\AssetBundles\dvseasons_dv99"
           Link="AssetBundles\dvseasons_dv99"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\Resources\Runtime\Textures\snowflake_realistic.png"
+    <None Include="$(DVSeasonsRuntimeResources)\Textures\snowflake_realistic.png"
           Link="Textures\snowflake_realistic.png"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\Resources\Runtime\Textures\snowflake_variations.png"
+    <None Include="$(DVSeasonsRuntimeResources)\Textures\snowflake_variations.png"
           Link="Textures\snowflake_variations.png"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\Resources\Runtime\Textures\winter_ballast_balanced.png"
+    <None Include="$(DVSeasonsRuntimeResources)\Textures\winter_ballast_balanced.png"
           Link="Textures\winter_ballast_balanced.png"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\Resources\Runtime\Textures\Seasonal\**\*.png"
+    <None Include="$(DVSeasonsRuntimeResources)\Textures\Seasonal\**\*.png"
           Link="Textures\Seasonal\%(RecursiveDir)%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

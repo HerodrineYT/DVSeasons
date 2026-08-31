@@ -36,6 +36,14 @@
 
 Готовая устанавливаемая папка создаётся в `artifacts/build/DVSeasons`.
 
+Два отдельных релизных ZIP для Nexus Mods и GitHub Releases создаются так:
+
+```powershell
+.\Tools\package_combined.ps1 -Version 0.2.0
+```
+
+`DVSeasons-0.2.0-Nexus.zip` содержит только устанавливаемый runtime. `DVSeasons-0.2.0-GitHub.zip` дополнительно содержит каталог `Source` с C#-проектами, тестами, документацией, инструментами разработки, визуальными эталонами и исходным Unity-проектом. PDB, кэши, результаты сборки, вложенные архивы и дублирующий AssetBundle в релизы не включаются.
+
 ## AssetBundle
 
 Обычная C#-сборка использует проверенный bundle из `Resources/Runtime/AssetBundles`. Для его пересборки требуется Unity 2019.4.40f1:

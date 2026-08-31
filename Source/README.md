@@ -34,7 +34,7 @@ Multiplayer не является обязательной зависимост�
 .\Tools\build.ps1 -DVInstallDir "D:\SteamLibrary\steamapps\common\Derail Valley"
 ```
 
-Результат появляется в `artifacts/build/DVSeasons`. Прямые команды и требования к зависимостям описаны в `Docs/BUILDING.md`.
+Результат появляется в `artifacts/build/DVSeasons`. Для публикации создаются два ZIP: облегчённый устанавливаемый пакет Nexus Mods и пакет GitHub Releases с тем же runtime и очищенным каталогом `Source`. Прямые команды и требования к зависимостям описаны в `Docs/BUILDING.md`.
 
 ## Установка
 

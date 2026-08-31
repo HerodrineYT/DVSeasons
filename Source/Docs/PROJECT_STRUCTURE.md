@@ -6,7 +6,7 @@ DVSeasons оформлен как самостоятельный публику�
 
 - `DVSeasons.Common` — модель сезона и независимые от Unity контракты. Проект сохраняет runtime-имя сборки `DVSeasons.Core.dll` для обратной совместимости.
 - `DVSeasons.Game` — точка входа Unity Mod Manager, визуальные эффекты, погода, настройки и загрузка ресурсов. Результат проекта — `DVSeasons.dll`.
-- `DVSeasons.Game/info.source.json` — исходный манифест; MSBuild копирует его в runtime как единственный `info.json`, поэтому универсальный архив не содержит второго UMM-манифеста внутри `Source`.
+- `DVSeasons.Game/info.source.json` — исходный манифест; MSBuild копирует его в runtime как единственный `info.json`. В GitHub-архиве он сохраняет имя `info.source.json`, поэтому в каждом релизном ZIP остаётся ровно один UMM-манифест `info.json`.
 - `DVSeasons.MP` — необязательный адаптер MultiplayerAPI. Результат проекта — `DVSeasons.Multiplayer.dll`; сетевой протокол передаёт полное состояние сезона вместе с длительностью сезона и перехода.
 - `DVSeasons.Unity` — воспроизводимые исходники AssetBundle: `Assets`, `Packages` и `ProjectSettings`.
 - `DVSeasons.Tests` — модульные тесты независимой логики.
