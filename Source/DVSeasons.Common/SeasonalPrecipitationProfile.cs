@@ -31,13 +31,13 @@ namespace DVSeasons.Core
             switch (season)
             {
                 case SeasonKind.Spring:
-                    return new SeasonalPrecipitationProfile(-0.04f, 0.01f);
+                    return new SeasonalPrecipitationProfile(-0.07f, 0.00f);
                 case SeasonKind.Summer:
-                    return new SeasonalPrecipitationProfile(0.08f, -0.02f);
+                    return new SeasonalPrecipitationProfile(0f, 0f);
                 case SeasonKind.Autumn:
-                    return new SeasonalPrecipitationProfile(-0.10f, 0.04f);
+                    return new SeasonalPrecipitationProfile(-0.16f, -0.04f);
                 case SeasonKind.Winter:
-                    return new SeasonalPrecipitationProfile(-0.055f, 0.02f);
+                    return new SeasonalPrecipitationProfile(-0.10f, -0.02f);
                 default:
                     return new SeasonalPrecipitationProfile(0f, 0f);
             }

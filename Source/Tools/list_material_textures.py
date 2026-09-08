@@ -30,7 +30,17 @@ def main() -> int:
         description = data.get("m_Name", "") + " " + " ".join(row[1] for row in rows)
         if pattern is not None and not pattern.search(description):
             continue
-        print("MATERIAL", data.get("m_Name", ""), "path", obj.path_id)
+        shader_pointer = data.get("m_Shader", {})
+        shader_name = ""
+        if shader_pointer.get("m_FileID") == 0 and shader_pointer.get("m_PathID") in objects:
+            shader = objects[shader_pointer["m_PathID"]]
+            try:
+                shader_name = str(shader.read_typetree().get("m_Name", ""))
+            except Exception:
+                shader_name = shader.type.name
+        print("MATERIAL", data.get("m_Name", ""), "path", obj.path_id,
+              "shader", shader_name, "shader-file", shader_pointer.get("m_FileID"),
+              "shader-path", shader_pointer.get("m_PathID"))
         for row in rows:
             print(" ", row[0], "=>", row[1], "file", row[2], "path", row[3])
     return 0

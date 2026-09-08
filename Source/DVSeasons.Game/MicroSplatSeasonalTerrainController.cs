@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using DVSeasons.Core;
 using UnityEngine;
@@ -11,6 +11,7 @@ namespace DVSeasons.Mod
         private sealed class Binding
         {
             public Material Material;
+            public Shader Shader;
             public string Property;
             public Texture Original;
             public Texture Applied;
@@ -69,6 +70,8 @@ namespace DVSeasons.Mod
         private float nextReapplyTime;
         private int lastSeasonKey = int.MinValue;
         private bool discoveryLogged;
+        private bool restored=true;
+        public int RestorePassCount { get; private set; }
         private bool missingWinterArrayLogged;
 
         public MicroSplatSeasonalTerrainController(SeasonAssetBundleRepository texturePack)
@@ -76,7 +79,7 @@ namespace DVSeasons.Mod
             this.texturePack = texturePack;
         }
 
-        public void Apply(SeasonState state, SeasonModSettings settings)
+        public void Apply(SeasonState state, SeasonModSettings settings, bool proceduralSnow = false, float? coverageOverride = null)
         {
             if (state == null || settings == null) return;
             if (!settings.SeasonalTexturesEnabled || !settings.TerrainTextureChanges ||
@@ -86,6 +89,7 @@ namespace DVSeasons.Mod
                 return;
             }
 
+            restored=false;
             if (Time.realtimeSinceStartup >= nextScanTime)
             {
                 // Resources.FindObjectsOfTypeAll<Material>() is expensive in DV's
@@ -95,9 +99,11 @@ namespace DVSeasons.Mod
                 Scan(settings.DistantTerrainSeasonal);
             }
 
-            var coverage = settings.GroundSnowEnabled
+            // Native landscape arrays cover every terrain LOD, including native
+            // distant terrain beyond the screen-space snow exposure maps.
+            var coverage = coverageOverride ?? (settings.GroundSnowEnabled
                 ? Mathf.Clamp01(state.SnowAmount * settings.GroundSnowStrength * settings.TextureChangeStrength)
-                : 0f;
+                : 0f);
             var coverageStep = SnowCoverProfile.GetGroundTextureStep(coverage);
             var seasonKey = coverageStep |
                 (settings.DistantTerrainSeasonal ? 0x100 : 0);
@@ -186,11 +192,13 @@ namespace DVSeasons.Mod
             for (var propertyIndex = 0; propertyIndex < DiffuseProperties.Length; propertyIndex++)
             {
                 var property = DiffuseProperties[propertyIndex];
-                if (!material.HasProperty(property)) continue;
+                if (!HasTextureProperty(material, property)) continue;
                 var observed = material.GetTexture(property) as Texture2DArray;
                 if (observed == null || observed.depth != WinterLayerOrder.Length) continue;
                 var key = material.GetInstanceID() + "|" + property;
-                if (bindings.ContainsKey(key)) continue;
+                Binding existing;
+                if (bindings.TryGetValue(key, out existing) && IsCurrentTextureBinding(existing))
+                    continue;
                 Texture original;
                 if (IsSeasonalTerrainTexture(observed))
                 {
@@ -202,13 +210,17 @@ namespace DVSeasons.Mod
                     if (!canonicalSummerArrays.ContainsKey(property))
                         canonicalSummerArrays.Add(property, observed);
                 }
-                bindings.Add(key, new Binding
+                // A material can keep its instance ID while its shader is replaced.
+                // Replace such a stale binding instead of retaining assumptions
+                // about the old shader's property layout.
+                bindings[key] = new Binding
                 {
                     Material = material,
+                    Shader = material.shader,
                     Property = property,
                     Original = original,
                     IsDistantTerrain = isDistantTerrain
-                });
+                };
                 added++;
             }
             return added;
@@ -256,12 +268,14 @@ namespace DVSeasons.Mod
         private int ScanDistantTerrainMaterial(Material material)
         {
             const string property = "_Splats";
-            if (material == null || !material.HasProperty(property)) return 0;
+            if (!HasTextureProperty(material, property)) return 0;
             var observed = material.GetTexture(property) as Texture2DArray;
             if (observed == null || observed.depth != WinterLayerOrder.Length) return 0;
 
             var key = material.GetInstanceID() + "|" + property;
-            if (bindings.ContainsKey(key)) return 0;
+            Binding existing;
+            if (bindings.TryGetValue(key, out existing) && IsCurrentTextureBinding(existing))
+                return 0;
             Texture original;
             if (IsSeasonalTerrainTexture(observed))
             {
@@ -273,13 +287,14 @@ namespace DVSeasons.Mod
                 if (!canonicalSummerArrays.ContainsKey(property))
                     canonicalSummerArrays.Add(property, observed);
             }
-            bindings.Add(key, new Binding
+            bindings[key] = new Binding
             {
                 Material = material,
+                Shader = material.shader,
                 Property = property,
                 Original = original,
                 IsDistantTerrain = true
-            });
+            };
             return 1;
         }
 
@@ -290,9 +305,32 @@ namespace DVSeasons.Mod
                 StringComparison.OrdinalIgnoreCase);
         }
 
+        private static bool HasTextureProperty(Material material, string property)
+        {
+            if (material == null || string.IsNullOrEmpty(property)) return false;
+            var shader = material.shader;
+            if (shader == null) return false;
+
+            // Material.HasProperty is not sufficient here. Unity can retain a saved
+            // material value with the same name after a shader swap even when the
+            // new shader exposes that name as a Color/Float. Calling GetTexture or
+            // SetTexture in that state emits "doesn't have a texture property".
+            // Unity 2019 exposes the declared type through Shader's property API.
+            var propertyIndex = shader.FindPropertyIndex(property);
+            return propertyIndex >= 0 &&
+                shader.GetPropertyType(propertyIndex) == ShaderPropertyType.Texture;
+        }
+
+        private static bool IsCurrentTextureBinding(Binding binding)
+        {
+            return binding != null && binding.Material != null &&
+                binding.Shader != null && binding.Material.shader == binding.Shader &&
+                HasTextureProperty(binding.Material, binding.Property);
+        }
+
         private bool IsBuiltInMicroSplatMaterial(Material material)
         {
-            if (material == null || !material.HasProperty("_Diffuse")) return false;
+            if (!HasTextureProperty(material, "_Diffuse")) return false;
             var diffuse = material.GetTexture("_Diffuse") as Texture2DArray;
             if (diffuse == null || diffuse.depth != WinterLayerOrder.Length) return false;
 
@@ -312,15 +350,16 @@ namespace DVSeasons.Mod
 
         private static bool HasBuiltInMicroSplatCompanions(Material material)
         {
-            return material.HasProperty("_ClusterDiffuse2") &&
-                material.HasProperty("_ClusterDiffuse3") &&
-                material.HasProperty("_DistanceResampleHackDiff");
+            return HasTextureProperty(material, "_ClusterDiffuse2") &&
+                HasTextureProperty(material, "_ClusterDiffuse3") &&
+                HasTextureProperty(material, "_DistanceResampleHackDiff");
         }
 
         private void ApplyCoverage(int coverageStep, bool distantTerrainEnabled)
         {
             foreach (var binding in bindings.Values)
             {
+                if (!IsCurrentTextureBinding(binding)) continue;
                 Texture target;
                 if (binding.IsDistantTerrain && !distantTerrainEnabled)
                     target = binding.Original;
@@ -339,7 +378,7 @@ namespace DVSeasons.Mod
         {
             foreach (var binding in bindings.Values)
             {
-                if (binding.Material == null) continue;
+                if (!IsCurrentTextureBinding(binding)) continue;
                 Texture target;
                 if (binding.IsDistantTerrain && !distantTerrainEnabled)
                     target = binding.Original;
@@ -401,8 +440,8 @@ namespace DVSeasons.Mod
 
         private static void Apply(Binding binding, Texture target)
         {
-            if (binding.Material == null || target == null) return;
-            binding.Material.SetTexture(binding.Property, target);
+            if (!IsCurrentTextureBinding(binding) || target == null) return;
+            if(binding.Material.GetTexture(binding.Property)!=target) binding.Material.SetTexture(binding.Property, target);
             binding.Applied = target;
         }
 
@@ -569,13 +608,22 @@ namespace DVSeasons.Mod
 
         private void Restore()
         {
+            if(restored) return;
+            restored=true;RestorePassCount++;
             foreach (var binding in bindings.Values)
             {
-                if (binding.Material == null) continue;
+                if (!IsCurrentTextureBinding(binding))
+                {
+                    // The material may survive a streamed-scene shader swap. Its old
+                    // property layout is no longer safe to query; a later Scan can
+                    // replace this binding if the new shader is compatible.
+                    binding.Applied = null;
+                    continue;
+                }
                 var current = binding.Material.GetTexture(binding.Property);
                 if (binding.Applied == null || current == binding.Applied ||
                     IsSeasonalTerrainTexture(current))
-                    binding.Material.SetTexture(binding.Property, binding.Original);
+                    if(current!=binding.Original) binding.Material.SetTexture(binding.Property, binding.Original);
                 binding.Applied = null;
             }
             var terrainLayersChanged = false;
@@ -586,8 +634,11 @@ namespace DVSeasons.Mod
                 if (binding.Applied == null || current == binding.Applied ||
                     current == binding.Winter)
                 {
-                    binding.Layer.diffuseTexture = binding.Original;
-                    terrainLayersChanged = true;
+                    if (current != binding.Original)
+                    {
+                        binding.Layer.diffuseTexture = binding.Original;
+                        terrainLayersChanged = true;
+                    }
                 }
                 binding.Applied = null;
             }

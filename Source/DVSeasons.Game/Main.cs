@@ -26,7 +26,7 @@ namespace DVSeasons.Mod
                 entry.OnSaveGUI = OnSaveGui;
                 entry.OnUpdate = OnUpdate;
                 entry.OnSessionStart = OnSessionStart;
-                entry.Logger.Log("Dynamic Seasons 0.2.0 loaded with automatic Russian/English localization.");
+                entry.Logger.Log("Dynamic Seasons 0.2.40 loaded with automatic Russian/English localization.");
                 return true;
             }
             catch (Exception exception)
@@ -113,12 +113,34 @@ namespace DVSeasons.Mod
                     "Mute rain audio during winter snowfall"));
             settings.SeasonalPrecipitationEnabled = GUILayout.Toggle(settings.SeasonalPrecipitationEnabled,
                 ModLocalization.Text(russian,
-                    "Сезонная частота и длительность осадков",
-                    "Seasonal precipitation frequency and duration"));
+                    "Сезонные облачность, туман и осадки",
+                    "Seasonal clouds, fog and precipitation"));
+            settings.SeasonalDaylightEnabled = GUILayout.Toggle(settings.SeasonalDaylightEnabled,
+                ModLocalization.Text(russian, "Сезонная длина светового дня (6–18 часов)",
+                    "Seasonal daylight duration (6–18 hours)"));
             settings.DisableWinterThunder = GUILayout.Toggle(settings.DisableWinterThunder,
                 ModLocalization.Text(russian,
                     "Отключать гром и молнии зимой",
                     "Disable thunder and lightning in winter"));
+            settings.ProceduralSnowEnabled = GUILayout.Toggle(settings.ProceduralSnowEnabled,
+                ModLocalization.Text(russian,
+                    "Новая система снега",
+                    "New snow system"));
+            GUILayout.Label(ModLocalization.Text(russian,
+                "Включено — динамический снег. Выключено — сезонные текстуры без расчёта снежного покрова.",
+                "On: dynamic snow. Off: seasonal textures without snow-cover simulation."));
+            settings.NativeWinterVegetationLod = GUILayout.Toggle(settings.NativeWinterVegetationLod,
+                ModLocalization.Text(russian,
+                    "Штатная детализация деревьев зимой (быстрее)",
+                    "Native tree detail in winter (faster)"));
+            settings.WinterWaterIceEnabled = GUILayout.Toggle(settings.WinterWaterIceEnabled,
+                ModLocalization.Text(russian,
+                    "Замерзание воды зимой",
+                    "Freeze world water in winter"));
+            settings.FreezeWinterPuddles = GUILayout.Toggle(settings.FreezeWinterPuddles,
+                ModLocalization.Text(russian,
+                    "Замораживать лужи зимой, сохраняя влажность",
+                    "Freeze winter puddles while keeping surface wetness"));
             GUILayout.Space(8f);
 
             settings.AutomaticCycle = GUILayout.Toggle(settings.AutomaticCycle,

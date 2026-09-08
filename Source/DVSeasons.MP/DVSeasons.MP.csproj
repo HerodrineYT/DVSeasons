@@ -3,7 +3,7 @@
     <TargetFramework>net48</TargetFramework>
     <AssemblyName>DVSeasons.Multiplayer</AssemblyName>
     <RootNamespace>DVSeasons.Multiplayer</RootNamespace>
-    <Version>0.2.0</Version>
+    <Version>0.2.40</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
   <ItemGroup>

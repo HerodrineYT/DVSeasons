@@ -18,10 +18,20 @@ if (-not (Test-Path -LiteralPath $UnityEditor -PathType Leaf)) { throw "Unity ed
 New-Item -ItemType Directory -Path $intermediate -Force | Out-Null
 New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
 
-& $UnityEditor -batchmode -quit -projectPath $unityProject `
-    -executeMethod DVSeasons.AssetBundleBuild.DVSeasonsAssetBundleBuilder.Build `
-    -bundleOutput $intermediate -logFile $log
-if ($LASTEXITCODE -ne 0) { throw "Unity AssetBundle build failed with exit code $LASTEXITCODE. See $log" }
+$unityArguments = @(
+    '-batchmode',
+    '-quit',
+    '-projectPath', ('"{0}"' -f $unityProject),
+    '-executeMethod', 'DVSeasons.AssetBundleBuild.DVSeasonsAssetBundleBuilder.Build',
+    '-bundleOutput', ('"{0}"' -f $intermediate),
+    '-logFile', ('"{0}"' -f $log)
+)
+$unityProcess = Start-Process -FilePath $UnityEditor -ArgumentList $unityArguments `
+    -PassThru -WindowStyle Hidden
+$unityProcess.WaitForExit()
+if ($unityProcess.ExitCode -ne 0) {
+    throw "Unity AssetBundle build failed with exit code $($unityProcess.ExitCode). See $log"
+}
 
 $lz4Bundle = Join-Path $intermediate 'dvseasons_dv99'
 & $Python (Join-Path $PSScriptRoot 'repack_unity_bundle.py') $lz4Bundle $temporaryBundle lzma

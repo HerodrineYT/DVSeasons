@@ -31,6 +31,12 @@ def main() -> int:
     before_assets = sorted(environment.container.keys())
     before_objects = [(obj.path_id, obj.type.name) for obj in environment.objects]
     before_embedded = embedded_hashes(environment.file)
+    # Recompress the original embedded bytes, not UnityPy's reserialization of
+    # SerializedFile metadata. Shader data and Unity's padding must stay intact.
+    for name, item in list(environment.file.files.items()):
+        reader = getattr(item, "reader", item)
+        reader.flags = item.flags
+        environment.file.files[name] = reader
     packed = environment.file.save(packer=packer)
     with open(output_path, "wb") as output:
         output.write(packed)

@@ -216,7 +216,8 @@ namespace DVSeasons.Tests
             var summer = SeasonalPrecipitationProfile.ForSeason(SeasonKind.Summer);
             var autumn = SeasonalPrecipitationProfile.ForSeason(SeasonKind.Autumn);
             var winter = SeasonalPrecipitationProfile.ForSeason(SeasonKind.Winter);
-            Assert.True(summer.StartThresholdOffset > 0f);
+            Assert.Equal(0f, summer.StartThresholdOffset);
+            Assert.Equal(0f, summer.MaximumThresholdOffset);
             Assert.True(autumn.StartThresholdOffset < winter.StartThresholdOffset);
             Assert.True(winter.StartThresholdOffset < 0f);
         }
@@ -227,8 +228,8 @@ namespace DVSeasons.Tests
             var state = new SeasonState(1.9d, SeasonKind.Summer, SeasonKind.Autumn,
                 0.5f, 0f, 12f, 0f);
             var profile = SeasonalPrecipitationProfile.FromState(state);
-            Assert.InRange(profile.StartThresholdOffset, -0.011f, -0.009f);
-            Assert.InRange(profile.MaximumThresholdOffset, 0.009f, 0.011f);
+            Assert.InRange(profile.StartThresholdOffset, -0.081f, -0.079f);
+            Assert.InRange(profile.MaximumThresholdOffset, -0.021f, -0.019f);
         }
     }
 }

@@ -99,6 +99,12 @@ namespace UnityModManagerNet
 
 namespace DVSeasons.Mod
 {
+    internal sealed class MultiplayerLogSpamFilter : IDisposable
+    {
+        public void Enable() { }
+        public void Disable() { }
+        public void Dispose() { }
+    }
     internal sealed class WeatherAdapter : IDisposable
     {
         public static DateTime? Clock;
@@ -111,6 +117,7 @@ namespace DVSeasons.Mod
         public void ResetForSession() { }
         public void ApplyWinterAdhesion(SeasonState state, bool enabled, bool respectOtherMods) { }
         public void ApplySeasonalPrecipitation(SeasonState state, bool enabled) { }
+        public void ApplySeasonalClimate(SeasonState state, bool daylight, bool weather) { }
         public void ApplyWinterThunderSuppression(SeasonState state, bool enabled) { }
         public void Dispose() { }
     }
@@ -127,6 +134,7 @@ namespace DVSeasons.Mod
         public static SeasonState LastApplied;
         private bool disposed;
         public SeasonVisualController(string path) { }
+        public void BeginSession(bool multiplayerSession) { }
         public void ResetForSession() { ResetCount++; LastApplied = null; }
         public void Apply(SeasonState state, float snow, float rain, UnityEngine.Vector3 wind,
             float light, SeasonModSettings settings)

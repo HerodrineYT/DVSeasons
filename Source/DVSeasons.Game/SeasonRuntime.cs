@@ -14,6 +14,7 @@ namespace DVSeasons.Mod
         private readonly SeasonModSettings settings;
         private readonly WeatherAdapter weather = new WeatherAdapter();
         private readonly WinterRainAudioController rainAudio = new WinterRainAudioController();
+        private readonly MultiplayerLogSpamFilter multiplayerLogSpam = new MultiplayerLogSpamFilter();
         private readonly SeasonVisualController visuals;
         private readonly ISeasonNetworkBridge network;
         private readonly SeasonCycle cycle;
@@ -64,6 +65,7 @@ namespace DVSeasons.Mod
         {
             if (disposed || started) return;
             started = true;
+            multiplayerLogSpam.Enable();
             receivedNetworkState = false;
             sessionWasClient = false;
             gameClock.Reset();
@@ -91,6 +93,7 @@ namespace DVSeasons.Mod
             WorldStreamingInit.LoadingFinished -= OnWorldLoaded;
             UnloadWatcher.UnloadRequested -= OnWorldUnloading;
             network.SetEnabled(false);
+            multiplayerLogSpam.Disable();
             weather.ResetForSession();
             rainAudio.Apply(0f, false, false);
             visuals.ResetForSession();
@@ -146,6 +149,8 @@ namespace DVSeasons.Mod
             weather.ApplyWinterAdhesion(currentState, settings.WinterAdhesionEnabled,
                 settings.RespectExternalWetnessOverride);
             weather.ApplySeasonalPrecipitation(currentState, settings.SeasonalPrecipitationEnabled);
+            weather.ApplySeasonalClimate(currentState, settings.SeasonalDaylightEnabled,
+                settings.SeasonalPrecipitationEnabled);
             weather.ApplyWinterThunderSuppression(currentState, settings.DisableWinterThunder);
             var useHostWeather = network.IsSessionActive && !network.IsAuthority && receivedNetworkState;
             var rainIntensity = useHostWeather ? networkRainIntensity : weather.RainIntensity;
@@ -222,6 +227,7 @@ namespace DVSeasons.Mod
             network.Dispose();
             weather.Dispose();
             rainAudio.Dispose();
+            multiplayerLogSpam.Dispose();
             visuals.Dispose();
             disposed = true;
         }
@@ -350,6 +356,9 @@ namespace DVSeasons.Mod
             {
                 if (!TryPrepareSession()) return;
                 sessionReady = true;
+                // Multiplayer can finish connecting just after the game's world-loaded
+                // event, so use bridge availability to reserve its control-hook window.
+                visuals.BeginSession(network.IsAvailable);
                 // Date/time restoration is now complete. The first sample anchors
                 // the new session instead of advancing from the previous world's date.
                 gameClock.Reset();

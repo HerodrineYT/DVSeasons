@@ -285,8 +285,25 @@ namespace DVSeasons.Tests
             {
                 var restored = (SeasonModSettings)new XmlSerializer(typeof(SeasonModSettings)).Deserialize(reader);
                 Assert.True(restored.RandomTransitionDuration);
+                Assert.False(restored.SurfaceSnowEnabled);
+                Assert.True(restored.WinterWaterIceEnabled);
+                Assert.True(restored.FreezeWinterPuddles);
+                Assert.False(restored.HideWinterPuddles);
+                Assert.Equal(1f, restored.SurfaceSnowStrength);
                 Assert.Equal(4f, restored.TransitionDays);
             }
+        }
+
+        [Fact]
+        public void SurfaceSnowStrengthIsClampedToSupportedRange()
+        {
+            var settings = new SeasonModSettings { SurfaceSnowStrength = 20f };
+            settings.Clamp();
+            Assert.Equal(1.5f, settings.SurfaceSnowStrength);
+
+            settings.SurfaceSnowStrength = -2f;
+            settings.Clamp();
+            Assert.Equal(0f, settings.SurfaceSnowStrength);
         }
 
         private static SaveGameData SavedCalendar(double phase, float days, float transition,

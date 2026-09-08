@@ -7,12 +7,18 @@ namespace DVSeasons.Mod
 {
     internal sealed class WeatherAdapter : IDisposable
     {
+        private readonly SeasonalClimateController climate = new SeasonalClimateController();
+
+        public void ApplySeasonalClimate(SeasonState state, bool daylight, bool weather)
+        {
+            TickProbe();
+            climate.Apply(driver, state, daylight, weather);
+        }
+
         private WeatherDriver driver;
         private float nextProbeTime;
-        private bool capturedWetness;
-        private bool ownedWetnessOverride;
-        private bool previousWasOverridden;
-        private float previousOverride;
+        private readonly WetnessOverrideOwnership wetnessOwnership=new WetnessOverrideOwnership();
+        private int adhesionStatus=-1;
         private bool capturedPrecipitation;
         private bool appliedPrecipitation;
         private Vector2 originalRainRangeStart;
@@ -63,22 +69,22 @@ namespace DVSeasons.Mod
         {
             TickProbe();
             if (driver == null) return;
-            if (!enabled || state.WinterWetnessEquivalent <= 0.0001f)
+            if (!enabled || state == null || state.WinterWetnessEquivalent <= 0.0001f)
             {
                 ReleaseWetnessOverride();
                 return;
             }
             var wetness = driver.WetnessValue;
-            if (!capturedWetness)
+            if(!wetnessOwnership.Acquire(wetness.IsOverridden,wetness.OverriddenValue,respectExternalOverride))
             {
-                capturedWetness = true;
-                previousWasOverridden = wetness.IsOverridden;
-                previousOverride = wetness.OverriddenValue;
-                if (respectExternalOverride && previousWasOverridden) return;
-                ownedWetnessOverride = true;
+                if(adhesionStatus!=1) Debug.Log("[DVSeasons] Winter adhesion is waiting for an external wetness override to end. Wetness="+wetness.CurrentValue);
+                adhesionStatus=1;return;
             }
-            if (!ownedWetnessOverride) return;
-            wetness.EngageOverride(Mathf.Max(wetness.RealValue, state.WinterWetnessEquivalent));
+            float value=Mathf.Max(wetness.RealValue,state.WinterWetnessEquivalent);
+            wetness.EngageOverride(value);
+            wetnessOwnership.Applied(value);
+            if(adhesionStatus!=2) Debug.Log("[DVSeasons] Winter adhesion active. Native wetness="+wetness.CurrentValue);
+            adhesionStatus=2;
         }
 
         public void ApplySeasonalPrecipitation(SeasonState state, bool enabled)
@@ -135,13 +141,15 @@ namespace DVSeasons.Mod
 
         public void ReleaseWetnessOverride()
         {
-            if (driver != null && ownedWetnessOverride)
+            bool overridden;float value;
+            if (driver != null && wetnessOwnership.Release(driver.WetnessValue.IsOverridden,
+                driver.WetnessValue.OverriddenValue,out overridden,out value))
             {
-                if (previousWasOverridden) driver.WetnessValue.EngageOverride(previousOverride);
+                if (overridden) driver.WetnessValue.EngageOverride(value);
                 else driver.WetnessValue.ClearOverride();
             }
-            ownedWetnessOverride = false;
-            capturedWetness = false;
+            wetnessOwnership.Reset();
+            adhesionStatus=-1;
         }
 
         public void ReleaseSeasonalPrecipitation()
@@ -201,6 +209,7 @@ namespace DVSeasons.Mod
 
         public void ResetForSession()
         {
+            climate.Reset();
             ReleaseWetnessOverride();
             ReleaseSeasonalPrecipitation();
             ReleaseThunderOverride();

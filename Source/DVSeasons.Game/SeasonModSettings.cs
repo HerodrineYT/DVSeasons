@@ -1,4 +1,4 @@
-using DVSeasons.Core;
+﻿using DVSeasons.Core;
 using UnityModManagerNet;
 
 namespace DVSeasons.Mod
@@ -20,6 +20,17 @@ namespace DVSeasons.Mod
         public float AmbientWinterSnowfall;
         public bool GroundSnowEnabled = true;
         public float GroundSnowStrength = 1f;
+        // Keep the serialized key so existing preferences survive the UI rename.
+        public bool ProceduralSnowEnabled = true;
+        public bool NativeWinterVegetationLod = true;
+        // Retained for settings-file compatibility with 0.2.3. The experimental
+        // rain-impact-derived surface-snow replacement has been removed.
+        public bool SurfaceSnowEnabled;
+        public float SurfaceSnowStrength = 1f;
+        public bool WinterWaterIceEnabled = true;
+        public bool FreezeWinterPuddles = true;
+        // Retained for settings-file compatibility. Puddles are no longer hidden.
+        public bool HideWinterPuddles;
         public float FoliageTintStrength = 0.75f;
         public bool SeasonalTexturesEnabled = true;
         public bool TerrainTextureChanges = true;
@@ -44,10 +55,11 @@ namespace DVSeasons.Mod
         public bool ReplaceRainWithSnow = true;
         public bool MuteRainAudioDuringSnow = true;
         public bool SeasonalPrecipitationEnabled = true;
+        public bool SeasonalDaylightEnabled = true;
         public bool DisableWinterThunder = true;
         public bool WinterAdhesionEnabled = true;
         public float WinterWetnessEquivalent = 0.45f;
-        public bool RespectExternalWetnessOverride = true;
+        public bool RespectExternalWetnessOverride = false;
         public float FallbackMinutesPerGameDay = 60f;
 
         public SeasonSettingsSnapshot ToSnapshot()
@@ -69,6 +81,8 @@ namespace DVSeasons.Mod
             LeaflessDistantTrees = true;
             ReplaceRainWithSnow = true;
             WinterAdhesionEnabled = true;
+            SurfaceSnowEnabled = false;
+            HideWinterPuddles = false;
             if (DaysPerSeason < 1f) DaysPerSeason = 1f;
             if (DaysPerSeason > 365f) DaysPerSeason = 365f;
             if (TransitionDays < 1f) TransitionDays = 1f;
@@ -82,6 +96,8 @@ namespace DVSeasons.Mod
             if (AmbientWinterSnowfall > 0.5f) AmbientWinterSnowfall = 0.5f;
             if (GroundSnowStrength < 0f) GroundSnowStrength = 0f;
             if (GroundSnowStrength > 1.5f) GroundSnowStrength = 1.5f;
+            if (SurfaceSnowStrength < 0f) SurfaceSnowStrength = 0f;
+            if (SurfaceSnowStrength > 1.5f) SurfaceSnowStrength = 1.5f;
             if (FoliageTintStrength < 0f) FoliageTintStrength = 0f;
             if (FoliageTintStrength > 1f) FoliageTintStrength = 1f;
             if (TextureChangeStrength < 0f) TextureChangeStrength = 0f;

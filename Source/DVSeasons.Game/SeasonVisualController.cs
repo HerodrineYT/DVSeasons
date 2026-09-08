@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using DVSeasons.Core;
@@ -32,6 +32,15 @@ namespace DVSeasons.Mod
         private readonly Dictionary<int, RainRecord> rainSystems = new Dictionary<int, RainRecord>();
         private readonly SeasonalTextureController seasonalTextures;
         private readonly MicroSplatSeasonalTerrainController microSplatTerrain;
+        private readonly WaterIceController waterIce;
+        private readonly WinterPuddleController winterPuddles;
+        private readonly ProceduralSnowController proceduralSurfaceSnow;
+        private readonly RailSnowGameSource railSnowSource = new RailSnowGameSource();
+        private readonly LocomotiveSnowHeatController locomotiveHeat = new LocomotiveSnowHeatController();
+        private readonly TenderCoalSnowController tenderCoal;
+        private readonly TrainSnowTrailController trainSnowTrail = new TrainSnowTrailController();
+        private readonly SnowFootstepAudioController snowFootsteps;
+        private DV.TerrainSystem.TerrainGrid snowTerrainGrid;
         private readonly SeasonAssetBundleRepository texturePack;
         private readonly string modPath;
         private GameObject snowObject;
@@ -45,38 +54,166 @@ namespace DVSeasons.Mod
         private float nextCabSnowClear;
         private bool snowSheltered;
         private bool cameraInsideCab;
+        private bool startupConfigured;
+        private int startupStage;
+        private float startupNotBefore;
+        private bool dynamicSnowEnabled;
 
         public SeasonVisualController(string modPath)
         {
             this.modPath = modPath ?? string.Empty;
+            snowFootsteps = new SnowFootstepAudioController(this.modPath);
             texturePack = new SeasonAssetBundleRepository(modPath);
+            tenderCoal=new TenderCoalSnowController(texturePack);
             seasonalTextures = new SeasonalTextureController(texturePack);
             microSplatTerrain = new MicroSplatSeasonalTerrainController(texturePack);
+            waterIce = new WaterIceController(texturePack);
+            winterPuddles = new WinterPuddleController(texturePack);
+            proceduralSurfaceSnow = new ProceduralSnowController(texturePack);
+            proceduralSurfaceSnow.SetVehicleDiscovery(() => RailSnowGameSource.GetCars());
+            proceduralSurfaceSnow.SetVehicleSnowRemaining(locomotiveHeat.Remaining);
+            snowFootsteps.SetVehicleSnowRemaining(locomotiveHeat.RemainingAt);
+            proceduralSurfaceSnow.SetNativeVehicleSnow(tenderCoal.HasSnowTexture);
+            proceduralSurfaceSnow.BeforeSnowRender = () =>
+            {
+                proceduralSurfaceSnow.SetWorldOffset(DV.OriginShift.OriginShift.currentMove);
+                railSnowSource.Update(proceduralSurfaceSnow.RailTracks);
+            };
+        }
+
+        public void BeginSession(bool multiplayerSession)
+        {
+            startupConfigured = true;
+            startupStage = 0;
+            startupNotBefore = Time.realtimeSinceStartup + (multiplayerSession ? 4f : 0.75f);
+            Debug.Log("[DVSeasons] Seasonal visuals deferred for " +
+                (multiplayerSession ? "4.00" : "0.75") +
+                " s while the world finishes initialization.");
         }
 
         public void Apply(SeasonState state, float precipitationSnowAmount, float rainIntensity, Vector3 windVelocity,
             float snowLightFactor, SeasonModSettings settings)
         {
             if (state == null || settings == null) return;
-            ScanTerrains();
-            ScanRainSystems();
-            seasonalTextures.Apply(state, settings);
-            microSplatTerrain.Apply(state, settings);
-            ApplyTerrains(state, settings);
+            SnowPerformance.Frame();
+            SetSnowMode(settings.ProceduralSnowEnabled);
+            snowFootsteps.SetCoverage(settings.GroundSnowEnabled
+                ? state.SnowAmount*settings.GroundSnowStrength*settings.TextureChangeStrength : 0f,
+                settings.GroundSnowEnabled);
+            if (!PrepareStartup(state, settings)) return;
+            var grid=dynamicSnowEnabled ? DV.TerrainSystem.TerrainGrid.Instance : null;
+            if(grid!=snowTerrainGrid)
+            {
+                if(snowTerrainGrid!=null) snowTerrainGrid.TerrainsMoved-=proceduralSurfaceSnow.InvalidateGeometry;
+                snowTerrainGrid=grid;
+                if(snowTerrainGrid!=null) snowTerrainGrid.TerrainsMoved+=proceduralSurfaceSnow.InvalidateGeometry;
+                proceduralSurfaceSnow.InvalidateGeometry();
+            }
+            using(SnowPerformance.Measure("world-discovery")) {ScanTerrains();ScanRainSystems();}
+            if (dynamicSnowEnabled)
+            {
+                proceduralSurfaceSnow.SetWorldOffset(DV.OriginShift.OriginShift.currentMove);
+                proceduralSurfaceSnow.SetWeather(settings.ReplaceRainWithSnow ? precipitationSnowAmount * rainIntensity : 0f);
+                locomotiveHeat.Update(settings.ReplaceRainWithSnow?precipitationSnowAmount*rainIntensity:0f,
+                    settings.GroundSnowEnabled?state.SnowAmount:0f,Time.deltaTime);
+                using(SnowPerformance.Measure("snow-prepare")) proceduralSurfaceSnow.Apply(settings.GroundSnowEnabled
+                    ? state.SnowAmount * settings.GroundSnowStrength * settings.TextureChangeStrength : 0f, true);
+            }
+            using(SnowPerformance.Measure("seasonal-textures")) seasonalTextures.Apply(state, settings, proceduralSurfaceSnow.IsActive,
+                proceduralSurfaceSnow.IsActive ? (float?)proceduralSurfaceSnow.Coverage : null);
+            using(SnowPerformance.Measure("terrain-materials")) microSplatTerrain.Apply(state, settings, proceduralSurfaceSnow.IsActive,
+                proceduralSurfaceSnow.IsActive ? (float?)proceduralSurfaceSnow.Coverage : null);
+            using(SnowPerformance.Measure("terrain-properties")) ApplyTerrains(state, settings);
+            using(SnowPerformance.Measure("tender-coal")) tenderCoal.Apply(settings.GroundSnowEnabled && settings.SeasonalTexturesEnabled && settings.TerrainTextureChanges
+                ? (proceduralSurfaceSnow.IsActive?proceduralSurfaceSnow.Coverage:state.SnowAmount*settings.GroundSnowStrength*settings.TextureChangeStrength):0f,
+                dynamicSnowEnabled ? (Func<Component,float>)locomotiveHeat.Remaining : null);
             ApplyRainCrossfade(settings.ReplaceRainWithSnow ? precipitationSnowAmount : 0f);
-            ApplySnowfall(precipitationSnowAmount, rainIntensity, windVelocity, snowLightFactor, settings);
+            using(SnowPerformance.Measure("particles")) ApplySnowfall(precipitationSnowAmount, rainIntensity, windVelocity, snowLightFactor, settings);
+
+            // Reuse the saved/networked SnowAmount for water and puddles. This keeps
+            // both ice systems in the exact same phase as terrain on reconnect and
+            // after loading a save midway through a thaw.
+            var winterCoverage = settings.GroundSnowEnabled
+                ? Mathf.Clamp01(state.SnowAmount * settings.GroundSnowStrength *
+                    settings.TextureChangeStrength)
+                : 0f;
+            if (dynamicSnowEnabled) using(SnowPerformance.Measure("train-snow-trail"))
+                trainSnowTrail.Apply(winterCoverage,
+                    settings.GroundSnowEnabled && settings.SnowParticlesEnabled,
+                    snowLightFactor,windVelocity);
+            using(SnowPerformance.Measure("water")) waterIce.Apply(settings.WinterWaterIceEnabled ? winterCoverage : 0f, snowLightFactor);
+            using(SnowPerformance.Measure("puddles")) winterPuddles.Apply(winterCoverage, settings.FreezeWinterPuddles);
+        }
+
+        private void SetSnowMode(bool enabled)
+        {
+            if (dynamicSnowEnabled == enabled) return;
+            dynamicSnowEnabled = enabled;
+            if (enabled) return;
+            proceduralSurfaceSnow.Apply(0f, false);
+            railSnowSource.Reset();
+            locomotiveHeat.Reset(); // Footsteps must see the seasonal snow again.
+            trainSnowTrail.Dispose();
+            if (snowTerrainGrid != null)
+                snowTerrainGrid.TerrainsMoved -= proceduralSurfaceSnow.InvalidateGeometry;
+            snowTerrainGrid = null;
+        }
+
+        private bool PrepareStartup(SeasonState state, SeasonModSettings settings)
+        {
+            if (!startupConfigured) BeginSession(false);
+            if (startupStage >= 4) return true;
+            if (Time.realtimeSinceStartup < startupNotBefore) return false;
+            if (startupStage == 0)
+            {
+                texturePack.BeginLoad();
+                startupStage = 1;
+                return false;
+            }
+            if (startupStage == 1)
+            {
+                if (!texturePack.IsLoadFinished) return false;
+                startupStage = 2;
+                Debug.Log("[DVSeasons] Seasonal AssetBundle ready; material discovery is being staged across frames.");
+                return false;
+            }
+            if (startupStage == 2)
+            {
+                using (SnowPerformance.Measure("startup-seasonal-textures"))
+                    seasonalTextures.Apply(state, settings, false, null);
+                startupStage = 3;
+                return false;
+            }
+            using (SnowPerformance.Measure("startup-terrain-materials"))
+                microSplatTerrain.Apply(state, settings, false, null);
+            startupStage = 4;
+            Debug.Log("[DVSeasons] Staged seasonal visual initialization complete.");
+            return false;
         }
 
         public void Dispose()
         {
             ResetForSession();
+            waterIce.Dispose();
+            winterPuddles.Dispose();
+            snowFootsteps.Dispose();
             texturePack.Dispose();
         }
 
         public void ResetForSession()
         {
+            SnowPerformance.Reset();
             seasonalTextures.Dispose();
             microSplatTerrain.Dispose();
+            waterIce.ResetForSession();
+            winterPuddles.ResetForSession();
+            proceduralSurfaceSnow.Dispose(); railSnowSource.Reset();
+            dynamicSnowEnabled = false;
+            tenderCoal.Dispose();locomotiveHeat.Reset();
+            trainSnowTrail.Dispose();
+            snowFootsteps.SetCoverage(0f,false);
+            if(snowTerrainGrid!=null) snowTerrainGrid.TerrainsMoved-=proceduralSurfaceSnow.InvalidateGeometry;
+            snowTerrainGrid=null;
             foreach (var record in terrains.Values)
             {
                 if (record.Terrain != null)
@@ -108,6 +245,9 @@ namespace DVSeasons.Mod
             nextCabSnowClear = 0f;
             snowSheltered = false;
             cameraInsideCab = false;
+            startupConfigured = false;
+            startupStage = 0;
+            startupNotBefore = 0f;
             texturePack.ResetForSession();
         }
 
@@ -166,7 +306,7 @@ namespace DVSeasons.Mod
             // frame while keeping 32 visually smooth steps over several game days.
             var seasonalTint = GetSeasonTint(state, 32);
             var tintStrength = Mathf.Clamp01(settings.FoliageTintStrength);
-            var snowCoverage = settings.GroundSnowEnabled
+            var snowCoverage = settings.GroundSnowEnabled && !proceduralSurfaceSnow.IsActive
                 ? Mathf.Clamp01(state.SnowAmount * settings.GroundSnowStrength * settings.TextureChangeStrength)
                 : 0f;
             var proceduralSnow = Quantize01(SnowCoverProfile.GetProceduralAmount(snowCoverage), 32);
@@ -190,7 +330,7 @@ namespace DVSeasons.Mod
                     record.OriginalDetailObjectDensity * 0.08f, winterClearing);
                 if (Mathf.Abs(record.Terrain.detailObjectDensity - detailDensity) > 0.001f)
                     record.Terrain.detailObjectDensity = detailDensity;
-                var leaflessDistanceWeight = settings.LeaflessDistantTrees ? winterClearing : 0f;
+                var leaflessDistanceWeight = settings.LeaflessDistantTrees && !settings.NativeWinterVegetationLod ? winterClearing : 0f;
                 var detailDistance = Mathf.Lerp(record.OriginalDetailObjectDistance,
                     Mathf.Max(record.OriginalDetailObjectDistance,
                         Mathf.Min(500f, record.OriginalDetailObjectDistance *

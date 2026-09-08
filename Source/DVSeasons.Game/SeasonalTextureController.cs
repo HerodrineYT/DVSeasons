@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using DVSeasons.Core;
 using UnityEngine;
@@ -7,7 +7,16 @@ namespace DVSeasons.Mod
 {
     internal sealed class SeasonalTextureController : IDisposable
     {
-        private enum TextureCategory : byte { Foliage, Bark, Ballast, Billboard, Sleeper }
+        private enum TextureCategory : byte
+        {
+            Foliage,
+            Bark,
+            Ballast,
+            Billboard,
+            Sleeper,
+            Rail,
+            RoadSurface
+        }
 
         private sealed class SeasonalTextureSet
         {
@@ -18,6 +27,9 @@ namespace DVSeasons.Mod
             private readonly bool evergreen;
             private Color32[] basePixels;
             private Color32[][] profiles;
+            private Color32[][] winterTrackProfiles;
+            private byte[] surfaceSnowRanks;
+            private readonly float[] surfaceSnowWeights = new float[256];
             private Color32[] outputPixels;
             private int lastStyleKey = int.MinValue;
             private int pendingStyleKey = int.MinValue;
@@ -27,6 +39,10 @@ namespace DVSeasons.Mod
             private float pendingTransition;
             private float pendingSeasonalStrength;
             private float pendingWinterWeight;
+            private WinterTrackTextureStage pendingWinterTrackStage;
+            private WinterTrackTextureStage lastAppliedWinterTrackStage =
+                (WinterTrackTextureStage)byte.MaxValue;
+            private float pendingWinterTrackSnowAmount;
             private Color32[][] billboardMipPixels;
             private bool failed;
 
@@ -44,7 +60,21 @@ namespace DVSeasons.Mod
             public Texture2D Output { get; private set; }
             public bool IsReady { get { return Output != null; } }
             public bool IsFailed { get { return failed; } }
+            public bool IsTrackSurface
+            {
+                get
+                {
+                    return category == TextureCategory.Ballast ||
+                        category == TextureCategory.Sleeper ||
+                        category == TextureCategory.Rail ||
+                        category == TextureCategory.RoadSurface;
+                }
+            }
             public bool HasPendingUpdate { get { return pendingStyleKey != int.MinValue && !failed; } }
+            public bool NeedsUpdate(int styleKey)
+            {
+                return !failed && lastStyleKey != styleKey;
+            }
 
             public int UpdateChunk(SeasonState state, float strength, int styleKey, int pixelBudget)
             {
@@ -53,15 +83,27 @@ namespace DVSeasons.Mod
                 {
                     if (!IsReady) Initialize();
                     if (!IsReady || (styleKey == lastStyleKey && pendingStyleKey == int.MinValue)) return 0;
-                    if (pendingStyleKey != styleKey)
+                    if (pendingStyleKey == int.MinValue)
                     {
                         pendingStyleKey = styleKey;
                         pendingPixelIndex = 0;
-                        pendingCurrent = profiles[(int)state.Current];
-                        pendingNext = profiles[(int)state.Next];
-                        pendingTransition = GetTextureTransition(state);
+                        pendingWinterTrackStage = WinterTrackTextureStage.SnowFree;
+                        pendingWinterTrackSnowAmount = Mathf.Clamp01(state.SnowAmount);
+                        if (!TryPrepareWinterTrackBlend(state))
+                        {
+                            pendingCurrent = profiles[(int)state.Current];
+                            pendingNext = profiles[(int)state.Next];
+                            pendingTransition = GetTextureTransition(state);
+                        }
                         pendingSeasonalStrength = Mathf.Clamp01(strength);
                         pendingWinterWeight = GetWinterWeight(state, pendingTransition);
+                        if (surfaceSnowRanks != null)
+                        {
+                            var coverage = SurfaceSnowAccumulation.Coverage(state.SnowAmount,
+                                SnowSurfaceProfile.Classify(source.name) == SnowSurfaceKind.Roof);
+                            for (var rank = 0; rank < surfaceSnowWeights.Length; rank++)
+                                surfaceSnowWeights[rank] = SurfaceSnowAccumulation.Weight((byte)rank, coverage);
+                        }
                     }
 
                     var firstPixel = pendingPixelIndex;
@@ -70,6 +112,13 @@ namespace DVSeasons.Mod
                     {
                         var seasonal = Lerp(pendingCurrent[i], pendingNext[i], pendingTransition);
                         outputPixels[i] = Lerp(basePixels[i], seasonal, pendingSeasonalStrength);
+                        if (surfaceSnowRanks != null)
+                        {
+                            outputPixels[i] = Lerp(basePixels[i], profiles[(int)SeasonKind.Winter][i],
+                                surfaceSnowWeights[surfaceSnowRanks[i]] * pendingSeasonalStrength);
+                            // Alpha may encode smoothness or atlas cutouts: never replace it with snow alpha.
+                            outputPixels[i].a = basePixels[i].a;
+                        }
                         if (category == TextureCategory.Foliage)
                         {
                             var alphaStrength = Mathf.Max(pendingSeasonalStrength,
@@ -87,6 +136,7 @@ namespace DVSeasons.Mod
                     {
                         UploadOutput(outputPixels, pendingWinterWeight >= 0.48f);
                         lastStyleKey = pendingStyleKey;
+                        LogAppliedWinterTrackStage();
                         ClearPendingUpdate();
                     }
                     return lastPixel - firstPixel;
@@ -110,10 +160,23 @@ namespace DVSeasons.Mod
                 pendingNext = null;
             }
 
+            private void LogAppliedWinterTrackStage()
+            {
+                if (winterTrackProfiles == null ||
+                    pendingWinterTrackStage == lastAppliedWinterTrackStage)
+                    return;
+                lastAppliedWinterTrackStage = pendingWinterTrackStage;
+                Debug.Log("[DVSeasons] Applied winter track stage " +
+                    pendingWinterTrackStage + " to " + category + " texture '" +
+                    (source == null ? "<destroyed>" : source.name) + "' (snow " +
+                    Mathf.RoundToInt(pendingWinterTrackSnowAmount * 100f) + "%).");
+            }
+
             private float GetTextureTransition(SeasonState state)
             {
                 var transition = Mathf.Clamp01(state.Transition);
-                if (category == TextureCategory.Ballast || category == TextureCategory.Sleeper)
+                if (category == TextureCategory.Ballast || category == TextureCategory.Sleeper ||
+                    category == TextureCategory.Rail || category == TextureCategory.RoadSurface)
                 {
                     // Ballast and sleepers are visually isolated by hard mesh
                     // boundaries. Let their winter texture follow actual snow cover
@@ -137,6 +200,37 @@ namespace DVSeasons.Mod
                 return transition;
             }
 
+            private bool TryPrepareWinterTrackBlend(SeasonState state)
+            {
+                if (winterTrackProfiles == null ||
+                    (state.Next != SeasonKind.Winter && state.Current != SeasonKind.Winter))
+                    return false;
+
+                WinterTrackTextureStage lower;
+                WinterTrackTextureStage upper;
+                float blend;
+                WinterTrackTextureProfile.GetBlend(state.SnowAmount,
+                    out lower, out upper, out blend);
+                pendingWinterTrackStage = blend < 0.5f ? lower : upper;
+                var snowFree = state.Current == SeasonKind.Winter
+                    ? (state.Next == SeasonKind.Winter ? basePixels : profiles[(int)state.Next])
+                    : profiles[(int)state.Current];
+                pendingCurrent = GetWinterTrackProfile(lower, snowFree);
+                pendingNext = GetWinterTrackProfile(upper, snowFree);
+                pendingTransition = blend;
+                return true;
+            }
+
+            private Color32[] GetWinterTrackProfile(WinterTrackTextureStage stage,
+                Color32[] snowFree)
+            {
+                if (stage == WinterTrackTextureStage.SnowFree) return snowFree;
+                var index = (int)stage - 1;
+                return index >= 0 && index < winterTrackProfiles.Length
+                    ? winterTrackProfiles[index]
+                    : snowFree;
+            }
+
             private static float GetWinterWeight(SeasonState state, float textureTransition)
             {
                 if (state.Current == SeasonKind.Winter && state.Next == SeasonKind.Spring)
@@ -154,6 +248,8 @@ namespace DVSeasons.Mod
                 DisposeOutput();
                 basePixels = null;
                 profiles = null;
+                winterTrackProfiles = null;
+                surfaceSnowRanks = null;
                 outputPixels = null;
                 billboardMipPixels = null;
                 ClearPendingUpdate();
@@ -167,12 +263,18 @@ namespace DVSeasons.Mod
                 // is completed incrementally, avoiding a million-pixel transition
                 // on a single frame.
                 var detailedTrackSurface = category == TextureCategory.Ballast ||
-                    category == TextureCategory.Sleeper;
+                    category == TextureCategory.Sleeper || category == TextureCategory.Rail;
+                var roadSurface = category == TextureCategory.RoadSurface;
                 var effectiveMaximumResolution = detailedTrackSurface
                     ? Mathf.Max(maximumResolution, 512)
+                    : roadSurface ? Mathf.Max(maximumResolution,
+                        string.Equals(source.name, "AsphaltRoad_01d",
+                            StringComparison.OrdinalIgnoreCase) ? 2048 : 1024)
                     : maximumResolution;
                 if (detailedTrackSurface)
                     effectiveMaximumResolution = Mathf.Min(effectiveMaximumResolution, 512);
+                if (roadSurface)
+                    effectiveMaximumResolution = Mathf.Min(effectiveMaximumResolution, 2048);
                 var scale = Mathf.Min(1f, effectiveMaximumResolution /
                     (float)Mathf.Max(source.width, source.height));
                 var width = Mathf.Max(16, Mathf.RoundToInt(source.width * scale));
@@ -194,11 +296,14 @@ namespace DVSeasons.Mod
                     }
                 }
                 basePixels = ReadScaledPixels(source, width, height);
+                winterTrackProfiles = LoadWinterTrackProfiles(width, height);
 
                 profiles = new Color32[4][];
                 var keepSpringNeutral = category == TextureCategory.Ballast || category == TextureCategory.Bark ||
-                    category == TextureCategory.Sleeper;
-                var keepAutumnNeutral = category == TextureCategory.Ballast || category == TextureCategory.Bark;
+                    category == TextureCategory.Sleeper || category == TextureCategory.Rail ||
+                    category == TextureCategory.RoadSurface;
+                var keepAutumnNeutral = category == TextureCategory.Ballast || category == TextureCategory.Bark ||
+                    category == TextureCategory.Rail || category == TextureCategory.RoadSurface;
                 profiles[(int)SeasonKind.Spring] = keepSpringNeutral
                     ? basePixels
                     : LoadOrCreateProfile(SeasonKind.Spring, width, height);
@@ -206,11 +311,14 @@ namespace DVSeasons.Mod
                 profiles[(int)SeasonKind.Autumn] = keepAutumnNeutral
                     ? basePixels
                     : LoadOrCreateProfile(SeasonKind.Autumn, width, height);
-                profiles[(int)SeasonKind.Winter] = LoadOrCreateProfile(SeasonKind.Winter, width, height);
+                profiles[(int)SeasonKind.Winter] = winterTrackProfiles == null
+                    ? LoadOrCreateProfile(SeasonKind.Winter, width, height)
+                    : winterTrackProfiles[(int)WinterTrackTextureStage.Late - 1];
+                if (roadSurface) PrepareDenseSurfaceSnow(width, height);
                 outputPixels = new Color32[basePixels.Length];
 
                 Output = new Texture2D(width, height, TextureFormat.RGBA32,
-                    category == TextureCategory.Billboard)
+                    category == TextureCategory.Billboard || category == TextureCategory.RoadSurface)
                 {
                     name = source.name + " [DVSeasons " + category + "]",
                     wrapMode = source.wrapMode,
@@ -224,9 +332,57 @@ namespace DVSeasons.Mod
                 UploadOutput(basePixels, false);
             }
 
+            private void PrepareDenseSurfaceSnow(int width, int height)
+            {
+                Color32[] dense;
+                if (!texturePack.TryLoadPixels("SnowSurfaceDense", SeasonKind.Winter, width, height, out dense))
+                {
+                    Debug.LogWarning("[DVSeasons] Dense surface snow PNG missing; retaining authored winter texture.");
+                    return;
+                }
+                const int maskSize = 128;
+                var ranks = SurfaceSnowAccumulation.CreateRanks(maskSize);
+                surfaceSnowRanks = new byte[basePixels.Length];
+                var winter = profiles[(int)SeasonKind.Winter];
+                // Do not mutate the repository's cached pixel arrays shared by other consumers.
+                var target = new Color32[basePixels.Length];
+                for (var y = 0; y < height; y++)
+                for (var x = 0; x < width; x++)
+                {
+                    var i = y * width + x;
+                    var mx = x * maskSize / (float)width;
+                    var my = y * maskSize / (float)height;
+                    var ix = (int)mx;
+                    var iy = (int)my;
+                    var nx = (ix + 1) % maskSize;
+                    var ny = (iy + 1) % maskSize;
+                    surfaceSnowRanks[i] = (byte)Mathf.RoundToInt(Mathf.Lerp(
+                        Mathf.Lerp(ranks[iy * maskSize + ix], ranks[iy * maskSize + nx], mx - ix),
+                        Mathf.Lerp(ranks[ny * maskSize + ix], ranks[ny * maskSize + nx], mx - ix), my - iy));
+                    var snow = dense[i];
+                    // Restrained albedo avoids a blown-white filter under direct sun.
+                    snow.r = (byte)Mathf.Min(snow.r, 232);
+                    snow.g = (byte)Mathf.Min(snow.g, 232);
+                    snow.b = (byte)Mathf.Min(snow.b, 232);
+                    target[i] = Lerp(winter[i], snow, 0.90f);
+                    if (basePixels[i].r < 5 && basePixels[i].g < 5 && basePixels[i].b < 5 &&
+                        winter[i].r < 5 && winter[i].g < 5 && winter[i].b < 5)
+                        target[i] = basePixels[i]; // Keep unused black atlas islands empty.
+                    target[i].a = basePixels[i].a;
+                }
+                profiles[(int)SeasonKind.Winter] = target;
+                Debug.Log("[DVSeasons] Prepared growing snow patches for '" + source.name +
+                    "': early 22%, middle 65%, full 95-98% coverage.");
+            }
+
             private void UploadOutput(Color32[] pixels, bool preserveThinBillboardCoverage)
             {
                 Output.SetPixels32(pixels, 0);
+                if (category == TextureCategory.RoadSurface)
+                {
+                    Output.Apply(true, false);
+                    return;
+                }
                 if (category != TextureCategory.Billboard)
                 {
                     Output.Apply(false, false);
@@ -329,10 +485,34 @@ namespace DVSeasons.Mod
                 return AdjustProfile(packed, season, category, width, height);
             }
 
+            private Color32[][] LoadWinterTrackProfiles(int width, int height)
+            {
+                if (category != TextureCategory.Ballast && category != TextureCategory.Sleeper &&
+                    category != TextureCategory.Rail)
+                    return null;
+                if (!texturePack.HasCompleteWinterTrackSet(source.name)) return null;
+
+                var staged = new Color32[3][];
+                for (var stage = WinterTrackTextureStage.Early;
+                    stage <= WinterTrackTextureStage.Late; stage++)
+                {
+                    Color32[] pixels;
+                    if (!texturePack.TryLoadWinterTrackPixels(source.name, stage,
+                        width, height, out pixels))
+                        return null;
+                    staged[(int)stage - 1] = pixels;
+                }
+                Debug.Log("[DVSeasons] Loaded three-stage winter " + category +
+                    " texture set for '" + source.name + "'.");
+                return staged;
+            }
+
             private Color32[] AdjustProfile(Color32[] pixels, SeasonKind season,
                 TextureCategory category, int width, int height)
             {
-                var adjusted = season == SeasonKind.Autumn ? EnhanceAutumnProfile(pixels) : pixels;
+                var adjusted = season == SeasonKind.Autumn && category != TextureCategory.Sleeper
+                    ? EnhanceAutumnProfile(pixels)
+                    : pixels;
                 if (category == TextureCategory.Billboard && season == SeasonKind.Winter && !evergreen)
                 {
                     Color32[] bareTreeAtlas;
@@ -491,9 +671,21 @@ namespace DVSeasons.Mod
             public SeasonalTextureSet Set;
         }
 
+        private sealed class SurfaceMaterialBinding
+        {
+            public MeshRenderer Renderer;
+            public int Slot;
+            public Material Original;
+            public Material Seasonal;
+        }
+        private readonly List<SurfaceMaterialBinding> surfaceMaterials = new List<SurfaceMaterialBinding>();
+        private readonly HashSet<int> scannedSurfaceRenderers = new HashSet<int>();
+
         private readonly Dictionary<string, SeasonalTextureSet> sets = new Dictionary<string, SeasonalTextureSet>();
         private readonly Dictionary<string, MaterialBinding> materialBindings = new Dictionary<string, MaterialBinding>();
         private readonly HashSet<int> scannedMaterials = new HashSet<int>();
+        private readonly Queue<SeasonalTextureSet> trackUpdateQueue = new Queue<SeasonalTextureSet>();
+        private readonly HashSet<SeasonalTextureSet> queuedTrackUpdates = new HashSet<SeasonalTextureSet>();
         private readonly Queue<SeasonalTextureSet> updateQueue = new Queue<SeasonalTextureSet>();
         private readonly HashSet<SeasonalTextureSet> queued = new HashSet<SeasonalTextureSet>();
         private readonly SeasonAssetBundleRepository texturePack;
@@ -501,24 +693,38 @@ namespace DVSeasons.Mod
         private int lastStyleKey = int.MinValue;
         private int configurationKey = int.MinValue;
         private bool active;
+        private bool proceduralSnow;
+        private SeasonState coverageState;
+        private float nextBindingCheck;
 
         public SeasonalTextureController(SeasonAssetBundleRepository texturePack)
         {
             this.texturePack = texturePack;
         }
 
-        public void Apply(SeasonState state, SeasonModSettings settings)
+        public void Apply(SeasonState state, SeasonModSettings settings, bool useProceduralSnow = false, float? coverageOverride = null)
         {
             if (!settings.SeasonalTexturesEnabled)
             {
                 if (active) Reset();
                 return;
             }
-            active = true;
+            if(coverageOverride.HasValue)
+            {
+                float transition=Mathf.Round(state.Transition*32f)/32f;
+                if(coverageState==null || coverageState.Current!=state.Current || coverageState.Next!=state.Next ||
+                    coverageState.Transition!=transition || Mathf.Abs(coverageState.SnowAmount-coverageOverride.Value)>0.0001f)
+                    coverageState=new SeasonState(state.Phase,state.Current,state.Next,transition,
+                        coverageOverride.Value,state.TemperatureCelsius,state.WinterWetnessEquivalent);
+                state=coverageState;
+            }
+            proceduralSnow = useProceduralSnow;
             var newConfigurationKey = settings.SeasonalTextureResolution * 397 ^ settings.MaximumSeasonalTextures ^
+                (proceduralSnow ? 0x40000 : 0) ^
                 (settings.TerrainTextureChanges ? 0x10000 : 0) ^
                 (settings.VegetationTextureChanges ? 0x20000 : 0);
             if (configurationKey != int.MinValue && configurationKey != newConfigurationKey) Reset();
+            active = true;
             configurationKey = newConfigurationKey;
             if (Time.realtimeSinceStartup >= nextScanTime)
             {
@@ -529,6 +735,7 @@ namespace DVSeasons.Mod
                 nextScanTime = Time.realtimeSinceStartup + 30f;
                 if (settings.TerrainTextureChanges || settings.VegetationTextureChanges)
                     ScanVegetationMaterials(settings);
+                if (settings.TerrainTextureChanges && !proceduralSnow) ScanBuiltSurfaceTextures(settings);
             }
 
             var styleKey = BuildStyleKey(state, settings.TextureChangeStrength);
@@ -537,10 +744,17 @@ namespace DVSeasons.Mod
                 lastStyleKey = styleKey;
                 foreach (var set in sets.Values) Enqueue(set);
             }
-            // TextureUpdatesPerFrame now controls both the number of texture sets
-            // touched and a strict pixel budget. Large albedos therefore span
-            // several frames instead of executing a full CPU blend and upload in a
-            // single frame during a season transition.
+            // Track surfaces have their own small, high-priority budget. They use
+            // three authored winter stages and must finish a stage before the next
+            // snow step arrives; otherwise a large vegetation queue can keep
+            // restarting their 512px blends and only the final winter texture ever
+            // reaches the material.
+            ProcessTrackUpdates(state, settings, styleKey);
+
+            // TextureUpdatesPerFrame controls both the number of ordinary texture
+            // sets touched and a strict pixel budget. Large vegetation albedos
+            // therefore span several frames instead of executing a full CPU blend
+            // and upload in one transition frame.
             var setBudget = Mathf.Clamp(settings.TextureUpdatesPerFrame, 1, 4);
             var pixelBudget = setBudget * 32768;
             for (var i = 0; i < setBudget && updateQueue.Count > 0 && pixelBudget > 0; i++)
@@ -550,9 +764,27 @@ namespace DVSeasons.Mod
                 var processed = set.UpdateChunk(state, settings.TextureChangeStrength,
                     styleKey, pixelBudget);
                 pixelBudget -= Mathf.Max(0, processed);
-                if (set.HasPendingUpdate) Enqueue(set);
+                if (set.HasPendingUpdate || set.NeedsUpdate(styleKey)) Enqueue(set);
             }
-            ApplyBindings();
+            // Ready textures retain their bindings; polling hundreds of native
+            // material properties every frame does not improve seasonal blending.
+            if(Time.realtimeSinceStartup>=nextBindingCheck)
+            {nextBindingCheck=Time.realtimeSinceStartup+0.5f;ApplyBindings();}
+        }
+
+        private void ProcessTrackUpdates(SeasonState state, SeasonModSettings settings,
+            int styleKey)
+        {
+            // One 64K chunk per frame keeps the additional CPU work bounded. Eight
+            // 512px track textures complete in at most 32 rendered frames, even
+            // when the normal queue is filled with 128 vegetation atlases.
+            const int trackPixelBudget = 65536;
+            if (trackUpdateQueue.Count == 0) return;
+            var set = trackUpdateQueue.Dequeue();
+            queuedTrackUpdates.Remove(set);
+            set.UpdateChunk(state, settings.TextureChangeStrength, styleKey,
+                trackPixelBudget);
+            if (set.HasPendingUpdate || set.NeedsUpdate(styleKey)) Enqueue(set);
         }
 
         public void Dispose() { Reset(); }
@@ -577,10 +809,17 @@ namespace DVSeasons.Mod
                     if (texture == null) continue;
                     var description = material.name + " " + texture.name + " " + shaderName;
                     TextureCategory category;
-                    if (!TryClassifyVegetation(description, out category)) continue;
+                    if (IsRoadSurfaceTexture(texture.name))
+                        category = TextureCategory.RoadSurface;
+                    else if (!TryClassifyVegetation(texture.name, out category) && !TryClassifyVegetation(description, out category))
+                        continue;
                     var trackSurface = category == TextureCategory.Ballast ||
-                        category == TextureCategory.Sleeper;
-                    if (trackSurface && !settings.TerrainTextureChanges) continue;
+                        category == TextureCategory.Sleeper || category == TextureCategory.Rail ||
+                        category == TextureCategory.RoadSurface;
+                    // Ballast/sleepers may render outside deferred and need native
+                    // winter albedo even when the procedural overlay is active.
+                    if (trackSurface && (!settings.TerrainTextureChanges ||
+                        (proceduralSnow && (category==TextureCategory.Rail || category==TextureCategory.RoadSurface)))) continue;
                     if (!trackSurface && !settings.VegetationTextureChanges) continue;
                     var bindingKey = materialId + "|" + property;
                     if (materialBindings.ContainsKey(bindingKey)) continue;
@@ -598,6 +837,74 @@ namespace DVSeasons.Mod
             }
         }
 
+        private void ScanBuiltSurfaceTextures(SeasonModSettings settings)
+        {
+            var added = 0;
+            foreach (var renderer in Resources.FindObjectsOfTypeAll<MeshRenderer>())
+            {
+                if (renderer == null || !renderer.gameObject.scene.IsValid() ||
+                    !renderer.gameObject.scene.isLoaded || !scannedSurfaceRenderers.Add(renderer.GetInstanceID())) continue;
+                var filter = renderer.GetComponent<MeshFilter>();
+                if (filter == null || filter.sharedMesh == null) continue;
+                var shared = renderer.sharedMaterials;
+                var changed = false;
+                for (var slot = 0; slot < shared.Length && slot < filter.sharedMesh.subMeshCount; slot++)
+                {
+                    var original = shared[slot];
+                    if (original == null || !original.HasProperty("_MainTex") || original.renderQueue > 2500) continue;
+                    var texture = original.GetTexture("_MainTex") as Texture2D;
+                    if (texture == null || IsRoadSurfaceTexture(texture.name) || texture.name.Contains("[DVSeasons")) continue;
+                    var kind = SnowSurfaceProfile.Classify(texture.name);
+                    if (kind == SnowSurfaceKind.None || !IsUpwardSurface(renderer, filter.sharedMesh, slot, texture.name)) continue;
+                    var set = GetOrCreate(texture, TextureCategory.RoadSurface, settings, false);
+                    if (set == null) continue;
+                    // Clone only this renderer's material slot; retain the native
+                    // shader, UVs, normals and all non-albedo properties.
+                    var material = new Material(original) { name = original.name + " [DVSeasons Surface Texture]" };
+                    surfaceMaterials.Add(new SurfaceMaterialBinding { Renderer = renderer, Slot = slot,
+                        Original = original, Seasonal = material });
+                    materialBindings.Add(material.GetInstanceID() + "|_MainTex", new MaterialBinding
+                        { Material = material, Property = "_MainTex", Original = texture, Set = set });
+                    shared[slot] = material;
+                    changed = true;
+                    added++;
+                }
+                if (changed) renderer.sharedMaterials = shared;
+            }
+            if (added > 0) Debug.Log("[DVSeasons] Bound " + added + " roof/pavement material slots to winter PNG textures (native shaders).");
+        }
+
+        private static bool IsUpwardSurface(MeshRenderer renderer, Mesh mesh, int slot, string textureName)
+        {
+            if (!mesh.isReadable)
+            {
+                // Tile-only roof materials are unambiguous. Shared sheet metal
+                // and concrete without readable geometry need a flat bounds check.
+                if (textureName.StartsWith("MB_rooftile_", StringComparison.OrdinalIgnoreCase)) return true;
+                var size = renderer.bounds.size;
+                return size.y < Mathf.Min(size.x, size.z) * 0.12f;
+            }
+            var vertices = mesh.vertices;
+            var indices = mesh.GetTriangles(slot);
+            var normalMatrix = renderer.localToWorldMatrix.inverse.transpose;
+            double topArea = 0, totalArea = 0;
+            // Bounded representative sampling; never alter or copy mesh topology.
+            var step = Mathf.Max(1, indices.Length / (3 * 256));
+            for (var triangle = 0; triangle < indices.Length / 3; triangle += step)
+            {
+                var i = triangle * 3;
+                var normal = Vector3.Cross(vertices[indices[i+1]] - vertices[indices[i]],
+                    vertices[indices[i+2]] - vertices[indices[i]]);
+                var area = normal.magnitude;
+                if (area <= 0.000001f) continue;
+                totalArea += area;
+                if (normalMatrix.MultiplyVector(normal).normalized.y >= 0.38f) topArea += area;
+            }
+            // Mixed wall+roof slots cannot be selectively recoloured by one UV
+            // texture. Leave those untouched rather than painting whole facades.
+            return SnowSurfaceProfile.IsMostlyUpward(topArea, totalArea);
+        }
+
         private SeasonalTextureSet GetOrCreate(Texture2D texture, TextureCategory category,
             SeasonModSettings settings, bool evergreenHint)
         {
@@ -610,7 +917,8 @@ namespace DVSeasons.Mod
             // the streamed vegetation atlases. Never let the foliage safety cap
             // silently exclude ballast or sleepers from the winter pass.
             var priorityTrackSurface = category == TextureCategory.Ballast ||
-                category == TextureCategory.Sleeper;
+                category == TextureCategory.Sleeper || category == TextureCategory.Rail ||
+                category == TextureCategory.RoadSurface;
             if (!priorityTrackSurface && sets.Count >= settings.MaximumSeasonalTextures)
                 return null;
             set = new SeasonalTextureSet(texture, category, settings.SeasonalTextureResolution,
@@ -637,6 +945,16 @@ namespace DVSeasons.Mod
 
         private void Reset()
         {
+            foreach (var binding in surfaceMaterials)
+            {
+                if (binding.Renderer == null) continue;
+                var shared = binding.Renderer.sharedMaterials;
+                if (binding.Slot < shared.Length && shared[binding.Slot] == binding.Seasonal)
+                {
+                    shared[binding.Slot] = binding.Original;
+                    binding.Renderer.sharedMaterials = shared;
+                }
+            }
             foreach (var binding in materialBindings.Values)
             {
                 if (binding.Material == null) continue;
@@ -644,27 +962,41 @@ namespace DVSeasons.Mod
                 if (binding.Set.Output == null || current == binding.Set.Output) binding.Material.SetTexture(binding.Property, binding.Original);
             }
             foreach (var set in sets.Values) set.Dispose();
+            foreach (var binding in surfaceMaterials)
+                if (binding.Seasonal != null) UnityEngine.Object.Destroy(binding.Seasonal);
+            surfaceMaterials.Clear();
+            scannedSurfaceRenderers.Clear();
             sets.Clear();
             materialBindings.Clear();
             scannedMaterials.Clear();
+            trackUpdateQueue.Clear();
+            queuedTrackUpdates.Clear();
             updateQueue.Clear();
             queued.Clear();
-            nextScanTime = 0f;
+            nextScanTime = nextBindingCheck = 0f;
             lastStyleKey = int.MinValue;
             configurationKey = int.MinValue;
-            active = false;
+            active = false;coverageState=null;
         }
 
         private void Enqueue(SeasonalTextureSet set)
         {
-            if (!set.IsFailed && queued.Add(set)) updateQueue.Enqueue(set);
+            if (set.IsFailed) return;
+            if (set.IsTrackSurface)
+            {
+                if (queuedTrackUpdates.Add(set)) trackUpdateQueue.Enqueue(set);
+                return;
+            }
+            if (queued.Add(set)) updateQueue.Enqueue(set);
         }
 
         private static int BuildStyleKey(SeasonState state, float strength)
         {
             var transitionStep = Mathf.RoundToInt(Mathf.Clamp01(state.Transition) * 32f);
+            var snowStep = SnowCoverProfile.GetGroundTextureStep(state.SnowAmount);
             var strengthStep = Mathf.RoundToInt(Mathf.Clamp01(strength) * 20f);
-            return ((int)state.Current << 16) | ((int)state.Next << 12) | (transitionStep << 5) | strengthStep;
+            return ((int)state.Current << 24) | ((int)state.Next << 22) |
+                (transitionStep << 16) | (snowStep << 10) | strengthStep;
         }
 
         private static bool IsAlbedoProperty(string property)
@@ -680,6 +1012,11 @@ namespace DVSeasons.Mod
         private static bool TryClassifyVegetation(string description, out TextureCategory category)
         {
             var value = (description ?? string.Empty).ToLowerInvariant();
+            if (ContainsAny(value, "railmed_d", "railold_d"))
+            {
+                category = TextureCategory.Rail;
+                return true;
+            }
             if (ContainsAny(value, "sleeper", "railway tie", "railroad tie", "cross tie", "crosstie"))
             {
                 category = TextureCategory.Sleeper;
@@ -720,6 +1057,18 @@ namespace DVSeasons.Mod
             var value = (description ?? string.Empty).ToLowerInvariant();
             return ContainsAny(value, "terrainimposter", "terrain imposter", "terrain_imposter",
                 "terrain impostor", "terrain_impostor", "distantterrain", "distant terrain");
+        }
+
+        private static bool IsRoadSurfaceTexture(string textureName)
+        {
+            return string.Equals(textureName, "SidewalkTiles_01d", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(textureName, "AsphaltRoad_01d", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(textureName, "Sidewalk_01d", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(textureName, "Roads_LOD_01d", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(textureName, "RoadDetail", StringComparison.OrdinalIgnoreCase) ||
+                // Concrete is shared with walls: the slope-masked surface snow
+                // pass now handles it instead of replacing its entire albedo.
+                string.Equals(textureName, "AsphaltTiling_01d", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool IsEvergreenDescription(string description)

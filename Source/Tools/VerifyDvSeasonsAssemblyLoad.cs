@@ -8,9 +8,9 @@ internal static class VerifyDvSeasonsAssemblyLoad
 
     private static int Main(string[] args)
     {
-        if (args.Length != 3 && (args.Length != 4 || args[3] != "--verify-save"))
+        if (args.Length != 3 && (args.Length != 4 || (args[3] != "--verify-save" && args[3] != "--verify-climate")))
         {
-            Console.Error.WriteLine("Usage: VerifyDvSeasonsAssemblyLoad <mod-dir> <managed-dir> <umm-dir> [--verify-save]");
+            Console.Error.WriteLine("Usage: VerifyDvSeasonsAssemblyLoad <mod-dir> <managed-dir> <umm-dir> [--verify-save|--verify-climate]");
             return 64;
         }
 
@@ -24,7 +24,19 @@ internal static class VerifyDvSeasonsAssemblyLoad
             Console.WriteLine("OK: loaded {0} types from {1}", types.Length, assembly.FullName);
             // --verify-save requires .NET 8 or Unity Mono: the game's stripped
             // Newtonsoft assembly is not strong-name-valid in desktop .NET 4.x.
-            if (args.Length == 4) VerifySaveRoundTrip(assembly, args[1]);
+            if (args.Length == 4 && args[3] == "--verify-save") VerifySaveRoundTrip(assembly, args[1]);
+            if (args.Length == 4 && args[3] == "--verify-climate")
+            {
+                var climate = assembly.GetType("DVSeasons.Mod.SeasonalClimateController", true);
+                var instance = Activator.CreateInstance(climate, true);
+                try
+                {
+                    climate.GetMethod("Install", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(instance, null);
+                    Console.WriteLine("OK: five climate patches installed against actual game DLLs, including weather transpiler.");
+                }
+                finally { ((IDisposable)instance).Dispose(); }
+                Console.WriteLine("OK: climate patches removed without launching the game.");
+            }
             return 0;
         }
         catch (ReflectionTypeLoadException exception)

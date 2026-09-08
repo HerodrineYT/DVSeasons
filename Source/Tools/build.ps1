@@ -47,6 +47,8 @@ $game = Find-DerailValley -ExplicitPath $DVInstallDir
 $modProject = Join-Path $projectRoot 'DVSeasons.Game\DVSeasons.Game.csproj'
 $testProject = Join-Path $projectRoot 'DVSeasons.Tests\DVSeasons.Tests.csproj'
 
+& (Join-Path $PSScriptRoot 'check_mod_updates.ps1') -DVInstallDir $game
+
 Write-Host "Building DVSeasons ($Configuration) against $game"
 & $dotnet build $modProject -c $Configuration "-p:DVInstallDir=$game"
 if ($LASTEXITCODE -ne 0) { throw "dotnet build failed with exit code $LASTEXITCODE." }

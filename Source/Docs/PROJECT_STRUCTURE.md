@@ -6,7 +6,7 @@ DVSeasons оформлен как самостоятельный публику�
 
 - `DVSeasons.Common` — модель сезона и независимые от Unity контракты. Проект сохраняет runtime-имя сборки `DVSeasons.Core.dll` для обратной совместимости.
 - `DVSeasons.Game` — точка входа Unity Mod Manager, визуальные эффекты, погода, настройки и загрузка ресурсов. Результат проекта — `DVSeasons.dll`.
-- `DVSeasons.Game/info.source.json` — исходный манифест; MSBuild копирует его в runtime как единственный `info.json`. В GitHub-архиве он сохраняет имя `info.source.json`, поэтому в каждом релизном ZIP остаётся ровно один UMM-манифест `info.json`.
+- `DVSeasons.Game/info.source.json` — исходный манифест; MSBuild копирует его в runtime как единственный `info.json`. В GitHub-пакете он сохраняет имя `info.source.json`, поэтому в каждом релизном пакете остаётся ровно один UMM-манифест `info.json`.
 - `DVSeasons.MP` — необязательный адаптер MultiplayerAPI. Результат проекта — `DVSeasons.Multiplayer.dll`; сетевой протокол передаёт полное состояние сезона вместе с длительностью сезона и перехода.
 - `DVSeasons.Unity` — воспроизводимые исходники AssetBundle: `Assets`, `Packages` и `ProjectSettings`.
 - `DVSeasons.Tests` — модульные тесты независимой логики.
@@ -26,5 +26,7 @@ DVSeasons оформлен как самостоятельный публику�
 - `artifacts/legacy` — сохранённые предыдущие сборки, резервные копии и исследовательские материалы старого рабочего каталога.
 
 `artifacts`, `bin`, `obj`, Unity `Library`, `Logs`, `Temp`, `UserSettings`, локальный Unity `Build` и генерируемые `Texture2DArray` исключены через `.gitignore`. Их отсутствие не мешает сборке исходников.
+
+`Tools/package_combined.ps1` создаёт отдельные Nexus- и GitHub-ZIP. GitHub-ZIP распаковывается перед загрузкой его содержимого в репозиторий; упаковка завершается ошибкой, если отдельный исходный или runtime-файл достигает лимита GitHub в 100 000 000 байт.
 
 Runtime-ресурсы намеренно хранятся в `Resources/Runtime`, а не внутри C#-проекта. `DVSeasons.Game.csproj` подключает AssetBundle и PNG-спрайт как linked content и копирует их в правильные пути пакета. Это отделяет код от ресурсов без изменения структуры устанавливаемого мода.
