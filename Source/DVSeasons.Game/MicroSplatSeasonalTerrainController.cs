@@ -73,10 +73,13 @@ namespace DVSeasons.Mod
         private bool restored=true;
         public int RestorePassCount { get; private set; }
         private bool missingWinterArrayLogged;
+        private readonly SpringTerrainTint springTint;
+        private int springStep;
 
         public MicroSplatSeasonalTerrainController(SeasonAssetBundleRepository texturePack)
         {
             this.texturePack = texturePack;
+            springTint=new SpringTerrainTint(texturePack);
         }
 
         public void Apply(SeasonState state, SeasonModSettings settings, bool proceduralSnow = false, float? coverageOverride = null)
@@ -105,12 +108,14 @@ namespace DVSeasons.Mod
                 ? Mathf.Clamp01(state.SnowAmount * settings.GroundSnowStrength * settings.TextureChangeStrength)
                 : 0f);
             var coverageStep = SnowCoverProfile.GetGroundTextureStep(coverage);
+            springStep=Mathf.RoundToInt(Mathf.Clamp01(SpringAppearance.Weight(state)*settings.TextureChangeStrength)*32);
             var seasonKey = coverageStep |
-                (settings.DistantTerrainSeasonal ? 0x100 : 0);
+                (settings.DistantTerrainSeasonal ? 0x100 : 0) | (springStep << 10);
             if (seasonKey != lastSeasonKey)
             {
                 lastSeasonKey = seasonKey;
                 ApplyCoverage(coverageStep, settings.DistantTerrainSeasonal);
+                if(springStep==0) springTint.Dispose();
             }
             else if (Time.realtimeSinceStartup >= nextReapplyTime)
             {
@@ -128,6 +133,7 @@ namespace DVSeasons.Mod
             foreach (var state in layeredArrays.Values)
                 if (state.Output != null) UnityEngine.Object.Destroy(state.Output);
             layeredArrays.Clear();
+            springTint.Dispose();
             nextScanTime = 0f;
             nextReapplyTime = 0f;
             discoveryLogged = false;
@@ -365,7 +371,10 @@ namespace DVSeasons.Mod
                     target = binding.Original;
                 else if (!TryGetCoverageTexture(binding, coverageStep, out target))
                     target = binding.Original;
-                Apply(binding, target ?? binding.Original);
+                target=target ?? binding.Original;
+                if(!binding.IsDistantTerrain || distantTerrainEnabled)
+                    target=springTint.Get(binding.Original,target,springStep,coverageStep);
+                Apply(binding, target);
             }
             ApplyTerrainLayers(coverageStep);
             Debug.Log("[DVSeasons] MicroSplat ground coverage step " + coverageStep + "/" +
@@ -384,6 +393,9 @@ namespace DVSeasons.Mod
                     target = binding.Original;
                 else if (!TryGetCoverageTexture(binding, coverageStep, out target))
                     target = binding.Original;
+                target=target ?? binding.Original;
+                if(!binding.IsDistantTerrain || distantTerrainEnabled)
+                    target=springTint.Get(binding.Original,target,springStep,coverageStep);
                 var current = binding.Material.GetTexture(binding.Property);
                 // Reassert our intended state when a streamed terrain material was
                 // repopulated with an older DVSeasons array after the cover-mode key
@@ -645,6 +657,7 @@ namespace DVSeasons.Mod
             if (terrainLayersChanged) FlushTerrains();
             lastSeasonKey = int.MinValue;
             nextReapplyTime = 0f;
+            springStep=0;springTint.Dispose();
         }
     }
 }

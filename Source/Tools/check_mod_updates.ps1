@@ -66,18 +66,31 @@ Get-ChildItem -LiteralPath $modsRoot -Directory | ForEach-Object {
 }
 
 $dvSeasonsMetadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
-$usedModIds = @($dvSeasonsMetadata.LoadAfter | Sort-Object -Unique)
+$requiredMods = @{}
+foreach ($requirement in $dvSeasonsMetadata.Requirements) {
+    if ($requirement -match '^(.*)-(\d+\.\d+\.\d+)$') {
+        $requiredMods[$Matches[1]] = ConvertTo-ComparableVersion $Matches[2]
+    } else { $requiredMods[$requirement] = [Version]::new(0, 0, 0, 0) }
+}
+$usedModIds = @(@($dvSeasonsMetadata.LoadAfter) + @($requiredMods.Keys) | Sort-Object -Unique)
 $outdated = @()
 
 Write-Host 'Checking versions of mods used by DVSeasons...'
 foreach ($modId in $usedModIds) {
     if (-not $installedMods.ContainsKey([string]$modId)) {
+        if ($requiredMods.ContainsKey([string]$modId)) { throw "Required mod ${modId} is not installed in $modsRoot." }
         Write-Host "  ${modId}: not installed (optional)."
         continue
     }
 
     $installed = $installedMods[[string]$modId].Info
     $installedVersion = [string]$installed.Version
+    if ($requiredMods.ContainsKey([string]$modId)) {
+        $version = ConvertTo-ComparableVersion $installedVersion
+        if ($null -eq $version -or $version -lt $requiredMods[[string]$modId]) {
+            throw "${modId} $installedVersion does not meet required version $($requiredMods[[string]$modId])."
+        }
+    }
     $repository = [string]$installed.Repository
     if ([string]::IsNullOrWhiteSpace($repository)) {
         Write-Warning "$modId $installedVersion has no official Repository feed in info.json; update status is unknown."

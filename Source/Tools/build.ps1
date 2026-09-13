@@ -60,5 +60,6 @@ if (-not $SkipTests) {
 
 & (Join-Path $PSScriptRoot 'verify_project.ps1') -RequireBuildOutput
 if ($LASTEXITCODE -ne 0) { throw "Project verification failed with exit code $LASTEXITCODE." }
+& (Join-Path $PSScriptRoot 'verify_localization.ps1')
 
 Write-Host "Build output: $(Join-Path $projectRoot 'artifacts\build\DVSeasons')"

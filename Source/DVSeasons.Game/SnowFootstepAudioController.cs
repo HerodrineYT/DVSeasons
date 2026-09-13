@@ -90,6 +90,10 @@ namespace DVSeasons.Mod
             if(surface!=FootstepsAudioScriptableObject.SurfaceType.Snow && coverage<.08f) return false;
             var surfaceCollider=GetCurrentSurface(position);
             var car=FindTrainCar(surfaceCollider);
+            // Build 99 combines the cab floor and exposed walkways into one
+            // non-convex walkable mesh. A ray from inside that mesh can miss the
+            // back face of the roof, so use the game's own cab trigger first.
+            if(IsInsideCab(car,position)) return false;
             var vehicleRemaining=vehicleSnowRemaining!=null && surfaceCollider!=null
                 ? Mathf.Clamp01(vehicleSnowRemaining(surfaceCollider)) : 1f;
             if(surfaceCollider!=null && vehicleSnowRemaining!=null &&
@@ -104,8 +108,9 @@ namespace DVSeasons.Mod
                 }
                 return false;
             }
-            if(surface==FootstepsAudioScriptableObject.SurfaceType.Snow) return true;
-
+            // Even a native Snow material is not evidence of exposed cover when
+            // it is under a roof. This also protects modded or unusual interiors
+            // whose cab trigger does not enclose the whole walkable floor.
             return !HasLowShelter(position,player);
         }
 
@@ -119,16 +124,34 @@ namespace DVSeasons.Mod
         private static TrainCar FindTrainCar(Collider collider)
         {
             if(collider==null) return null;
-            var car=collider.GetComponentInParent<TrainCar>();
+            // TrainCarColliders reparents [walkable] below the detached interior
+            // root, where GetComponentInParent<TrainCar>() cannot see the car.
+            var car=TrainCar.Resolve(collider.transform);
             if(car==null && collider.attachedRigidbody!=null)
-                car=collider.attachedRigidbody.GetComponentInParent<TrainCar>();
+                car=TrainCar.Resolve(collider.attachedRigidbody.transform);
             return car;
+        }
+
+        private static bool IsInsideCab(TrainCar car,Vector3 footstepPosition)
+        {
+            var cab=car!=null?car.cabTeleportDestination:null;
+            if(cab==null) return false;
+            // The request position is at the feet. Probe around torso height so
+            // a trigger that starts just above the floor still classifies the cab.
+            var probe=footstepPosition+Vector3.up*.8f;
+            foreach(var collider in cab.GetComponentsInChildren<Collider>())
+            {
+                if(collider==null || !collider.enabled || !collider.gameObject.activeInHierarchy)
+                    continue;
+                if((collider.ClosestPoint(probe)-probe).sqrMagnitude<.0001f) return true;
+            }
+            return false;
         }
 
         private static bool HasLowShelter(Vector3 position,Transform player)
         {
             var count=Physics.RaycastNonAlloc(position+Vector3.up*.12f,Vector3.up,
-                shelterHits,3.1f,Physics.DefaultRaycastLayers,QueryTriggerInteraction.Ignore);
+                shelterHits,3.1f,SeasonSurfaceLayers.Mask,QueryTriggerInteraction.Ignore);
             for(var i=0;i<count;i++)
             {
                 var collider=shelterHits[i].collider;
@@ -145,9 +168,12 @@ namespace DVSeasons.Mod
         private static bool BelongsToPlayer(Transform candidate,Transform player)
         {
             if(candidate==null || player==null) return false;
-            var playerRoot=player.root;
-            return candidate==player || candidate.IsChildOf(player) || player.IsChildOf(candidate) ||
-                (playerRoot!=null && candidate.root==playerRoot);
+            // CharacterReparenting attaches the player below car.interior. Cab
+            // geometry then shares an ancestor/root with the footsteps component,
+            // but it is still real shelter and must not be filtered out. Player
+            // children cover the camera/hands; larger body colliders are rejected
+            // by the footprint check below.
+            return candidate==player || candidate.IsChildOf(player);
         }
 
         private void Load(string path)
@@ -170,7 +196,7 @@ namespace DVSeasons.Mod
             {Debug.LogWarning("[DVSeasons] Could not load snow footstep '"+path+"': "+exception.Message);}
         }
 
-        private static bool TryReadPcm16Wave(byte[] bytes,out int channels,out int frequency,
+        internal static bool TryReadPcm16Wave(byte[] bytes,out int channels,out int frequency,
             out float[] samples)
         {
             channels=0;frequency=0;samples=null;

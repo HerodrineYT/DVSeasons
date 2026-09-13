@@ -15,6 +15,8 @@ namespace DVSeasons.Mod
         private static float nextReport;
         private static int frames;
         private static double frameSeconds;
+        private static float maximumFrame;
+        private static int slowFrames, lastCollections;
         public struct Scope : IDisposable
         {
             private readonly string name;
@@ -31,8 +33,10 @@ namespace DVSeasons.Mod
         public static void Frame()
         {
             var dt=Time.unscaledDeltaTime;
-            if(dt>0 && dt<1f) {frames++;frameSeconds+=dt;}
-            if(nextReport<=0) nextReport=Time.realtimeSinceStartup+20f;
+            // Do not discard stalls >= 1 second: those are exactly the frames
+            // this diagnostic needs to expose when a client reports freezes.
+            if(dt>0) {frames++;frameSeconds+=dt;maximumFrame=Math.Max(maximumFrame,dt);if(dt>=.1f)slowFrames++;}
+            if(nextReport<=0) {nextReport=Time.realtimeSinceStartup+20f;lastCollections=GC.CollectionCount(0);}
             if(Time.realtimeSinceStartup<nextReport) return;
             var report=new StringBuilder("[DVSeasons] Performance: CPU submission ms mean/max; ");
             foreach(var pair in counters)
@@ -44,9 +48,13 @@ namespace DVSeasons.Mod
                 c.Ticks=c.Maximum=0;c.Count=0;
             }
             report.Append("whole-frame FPS=").Append((frameSeconds>0?frames/frameSeconds:0).ToString("F1",CultureInfo.InvariantCulture))
+                .Append("; max-frame-ms=").Append((maximumFrame*1000).ToString("F1",CultureInfo.InvariantCulture))
+                .Append("; frames>=100ms=").Append(slowFrames)
+                .Append("; GC0=").Append(GC.CollectionCount(0)-lastCollections)
                 .Append(". CPU scopes exclude GPU execution; FPS includes the whole game.");
             UnityEngine.Debug.Log(report.ToString());nextReport=Time.realtimeSinceStartup+20f;frames=0;frameSeconds=0;
+            maximumFrame=0;slowFrames=0;lastCollections=GC.CollectionCount(0);
         }
-        public static void Reset() {counters.Clear();nextReport=0;frames=0;frameSeconds=0;}
+        public static void Reset() {counters.Clear();nextReport=0;frames=0;frameSeconds=0;maximumFrame=0;slowFrames=0;lastCollections=0;}
     }
 }

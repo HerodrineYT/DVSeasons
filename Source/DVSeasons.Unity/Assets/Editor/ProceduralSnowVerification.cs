@@ -15,7 +15,251 @@ namespace DVSeasons.AssetBundleBuild
         private static Camera camera;
         private static string directory;
 
+        [Serializable] private sealed class ImportedRoofMesh
+        { public Vector3[] vertices; public Vector3[] normals; public Vector2[] uv; public Vector4[] tangents; public int[] indices; }
+
+        // Run Tools/prepare_de6_roof_verification.py against the installed game
+        // first. Original meshes/textures stay in artifacts, outside releases.
+        public static void VerifyDe6Roof()
+        {
+            var root=Path.GetFullPath(Path.Combine(Application.dataPath,"../.."));
+            directory=Path.Combine(root,"artifacts/verification/0.3.31-roof"); Directory.CreateDirectory(directory);
+            EditorSceneManager.NewScene(NewSceneSetup.EmptyScene,NewSceneMode.Single);
+            RenderSettings.ambientMode=AmbientMode.Flat; RenderSettings.ambientLight=new Color(.25f,.25f,.25f);
+            RenderSettings.fog=false; QualitySettings.antiAliasing=0;
+            camera=new GameObject("DE6 roof camera") {tag="MainCamera"}.AddComponent<Camera>();
+            camera.renderingPath=RenderingPath.DeferredShading;camera.allowHDR=true;camera.allowMSAA=false;
+            camera.transform.position=new Vector3(-5,7,10);camera.transform.LookAt(new Vector3(0,3.5f,5.8f));
+            camera.targetTexture=new RenderTexture(512,384,24,RenderTextureFormat.ARGBHalf,RenderTextureReadWrite.Linear);
+            camera.targetTexture.Create();
+            var material=new Material(Shader.Find("Standard"));material.color=new Color(.12f,.08f,.04f);
+            foreach(var property in new[]{"_MainTex","_BumpMap","_DetailNormalMap"})
+            {
+                var texture=new Texture2D(2,2,TextureFormat.RGBA32,true,property!="_MainTex");
+                texture.LoadImage(File.ReadAllBytes(Path.Combine(root,"artifacts/verification/de6-geometry/"+property+".png")));
+                material.SetTexture(property,texture);
+            }
+            material.color=Color.white;material.EnableKeyword("_NORMALMAP");material.EnableKeyword("_DETAIL_MULX2");
+            material.SetFloat("_DetailNormalMapScale",-1f);material.SetTextureScale("_DetailAlbedoMap",Vector2.one*10);
+            var vehicle=new GameObject("DE6 extracted body fixture");
+            var meshes=new Mesh[5];var levels=new LOD[5];
+            var thresholds=new[]{.6753417f,.3764874f,.2187734f,.1027903f,.0061201f};
+            for(int i=0;i<5;i++)
+            {
+                var name=i==0?"diesel_body":"diesel_body_LOD"+i;
+                var part=new GameObject(name);part.transform.SetParent(vehicle.transform);
+                meshes[i]=ReadDe6Mesh(root,name);part.AddComponent<MeshFilter>().sharedMesh=meshes[i];
+                var renderer=part.AddComponent<MeshRenderer>();renderer.sharedMaterial=material;
+                levels[i]=new LOD(thresholds[i],new Renderer[]{renderer});
+            }
+            var group=vehicle.AddComponent<LODGroup>();group.SetLODs(levels);
+            group.localReferencePoint=new Vector3(0,2.141522f,.010009f);group.size=18.304617f;
+            var interior=new GameObject("interior");interior.transform.SetParent(vehicle.transform);
+            interior.AddComponent<MeshFilter>().sharedMesh=ReadDe6Mesh(root,"cab");
+            var interiorMaterial=new Material(Shader.Find("Standard")){color=new Color(.12f,.08f,.04f)};
+            interior.AddComponent<MeshRenderer>().sharedMaterial=interiorMaterial;
+            var sun=new GameObject("Sun").AddComponent<Light>();sun.type=LightType.Directional;
+            sun.transform.rotation=Quaternion.Euler(60,-30,0);sun.intensity=1;
+            var modPath=Path.Combine(root,"artifacts/build/DVSeasons");
+            var assembly=Assembly.LoadFrom(Path.Combine(modPath,"DVSeasons.dll"));
+            var repositoryType=assembly.GetType("DVSeasons.Mod.SeasonAssetBundleRepository",true);
+            var repository=Activator.CreateInstance(repositoryType,new object[]{modPath});
+            var bundle=AssetBundle.LoadFromFile(Path.Combine(modPath,"AssetBundles/dvseasons_dv99"));
+            repositoryType.GetProperty("Bundle").GetSetMethod(true).Invoke(repository,new object[]{bundle});
+            var type=assembly.GetType("DVSeasons.Mod.ProceduralSnowController",true);
+            controller=Activator.CreateInstance(type,new[]{repository});apply=type.GetMethod("Apply");
+            type.GetMethod("SetWeather").Invoke(controller,new object[]{1f});
+            var registry=type.GetField("vehicles",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(controller);
+            registry.GetType().GetMethod("Register").Invoke(registry,new object[]{vehicle.transform,interior.transform,null});
+            // Read albedo after the snow pass: this separates missing coverage
+            // from legitimate differences in sunlight on opposite roof slopes.
+            var albedo=new RenderTexture(512,384,0,RenderTextureFormat.ARGBHalf,RenderTextureReadWrite.Linear);
+            albedo.Create();var probe=new CommandBuffer{name="DE6 snow verification albedo"};
+            probe.Blit(BuiltinRenderTextureType.GBuffer0,albedo);
+            camera.AddCommandBuffer(CameraEvent.AfterLighting,probe);
+            float oldLodBias=QualitySettings.lodBias;
+            try
+            {
+                for(int pass=0;pass<14;pass++)
+                {
+                    int level=pass<10?pass%5:0;float side=pass<5?-1:1;
+                    if(pass>=10)
+                    {
+                        // Strong tangent-space paint detail must not turn an
+                        // upward roof into a downward-facing snow surface.
+                        var bump=new Texture2D(1,1,TextureFormat.RGBA32,false,true);
+                        var direction=new[]{Vector2.right,Vector2.left,Vector2.up,Vector2.down}[pass-10];
+                        bump.SetPixel(0,0,new Color(1,direction.y*.5f+.5f,1,direction.x*.5f+.5f));bump.Apply();
+                        material.SetTexture("_BumpMap",bump);material.DisableKeyword("_DETAIL_MULX2");
+                    }
+                    vehicle.transform.position=pass<5?Vector3.zero:new Vector3(17000,110,18000);
+                    vehicle.transform.rotation=Quaternion.Euler(0,pass<5?0:137,0);
+                    camera.transform.position=vehicle.transform.TransformPoint(new Vector3(side*5,7,10));
+                    camera.transform.LookAt(vehicle.transform.TransformPoint(new Vector3(0,3.5f,5.8f)));
+                    float screenHeight=group.size/(2*Vector3.Distance(camera.transform.position,vehicle.transform.TransformPoint(group.localReferencePoint))*Mathf.Tan(camera.fieldOfView*Mathf.Deg2Rad*.5f));
+                    float wanted=level==0?1:(thresholds[level-1]+thresholds[level])*.5f;
+                    QualitySettings.lodBias=wanted/screenHeight;
+                    for(int i=0;i<5;i++) {apply.Invoke(controller,new object[]{1f,true});camera.Render();}
+                    var shot=Capture(1,"de6-"+pass+"-lod"+level);
+                    UnityEngine.Object.DestroyImmediate(shot);
+                    var read=new Texture2D(512,384,TextureFormat.RGBAHalf,false,true);
+                    var previous=RenderTexture.active;RenderTexture.active=albedo;
+                    read.ReadPixels(new Rect(0,0,512,384),0,0);read.Apply();RenderTexture.active=previous;
+                    float minimum=1f;
+                    foreach(float x in new[]{.5f,.85f,1f,1.2f,1.35f,1.43f})
+                    {
+                        var p=RoofPoint(meshes[level],side*x,5.8f);
+                        minimum=Mathf.Min(minimum,Sample(read,vehicle.transform.TransformPoint(p)));
+                    }
+                    Debug.Log("DE6 roof LOD="+level+" side="+side+" minimum snow albedo="+minimum);
+                    Require(minimum>.55f,"DE6 cab roof lost snow at LOD "+level+" side "+side+": "+minimum);
+                    UnityEngine.Object.DestroyImmediate(read);
+                }
+                Debug.Log("DE6 roof GPU verification passed: actual model and normal maps, both slopes, five LODs, world translation and rotation.");
+            }
+            finally
+            {
+                QualitySettings.lodBias=oldLodBias;camera.RemoveCommandBuffer(CameraEvent.AfterLighting,probe);
+                probe.Dispose();albedo.Release();UnityEngine.Object.DestroyImmediate(albedo);
+                ((IDisposable)controller).Dispose();((IDisposable)repository).Dispose();
+            }
+        }
+
+        private static Mesh ReadDe6Mesh(string root,string name)
+        {
+            var data=JsonUtility.FromJson<ImportedRoofMesh>(File.ReadAllText(Path.Combine(root,"artifacts/verification/de6-geometry/"+name+".json")));
+            var mesh=new Mesh{indexFormat=IndexFormat.UInt32,vertices=data.vertices,normals=data.normals,uv=data.uv,tangents=data.tangents,triangles=data.indices};
+            mesh.RecalculateBounds();return mesh;
+        }
+
+        private static Vector3 RoofPoint(Mesh mesh,float x,float z)
+        {
+            var vertices=mesh.vertices;var indices=mesh.triangles;float height=float.NegativeInfinity;
+            for(int i=0;i<indices.Length;i+=3)
+            {
+                var a=vertices[indices[i]];var b=vertices[indices[i+1]]-a;var c=vertices[indices[i+2]]-a;
+                float determinant=b.x*c.z-b.z*c.x;if(Mathf.Abs(determinant)<1e-8f) continue;
+                float u=((x-a.x)*c.z-(z-a.z)*c.x)/determinant;
+                float v=(b.x*(z-a.z)-b.z*(x-a.x))/determinant;
+                if(u>=0 && v>=0 && u+v<=1) height=Mathf.Max(height,a.y+u*b.y+v*c.y);
+            }
+            Require(height>3,"DE6 roof sample missed the roof");return new Vector3(x,height,z);
+        }
+
+        public static void VerifyRoofCoverage()
+        {
+            var root = Path.GetFullPath(Path.Combine(Application.dataPath,"../.."));
+            directory = Path.Combine(root,"artifacts/verification/0.3.11"); Directory.CreateDirectory(directory);
+            EditorSceneManager.NewScene(NewSceneSetup.EmptyScene,NewSceneMode.Single);
+            RenderSettings.ambientMode=AmbientMode.Flat; RenderSettings.ambientLight=new Color(.25f,.25f,.25f);
+            RenderSettings.fog=false; QualitySettings.antiAliasing=0;
+            camera=new GameObject("Roof test camera") {tag="MainCamera"}.AddComponent<Camera>();
+            camera.renderingPath=RenderingPath.DeferredShading;camera.allowHDR=true;camera.allowMSAA=false;
+            camera.transform.position=new Vector3(-8,8,-12);camera.transform.LookAt(new Vector3(0,2,0));
+            camera.targetTexture=new RenderTexture(512,384,24,RenderTextureFormat.ARGBHalf,RenderTextureReadWrite.Linear);
+            camera.targetTexture.Create();
+            var material=new Material(Shader.Find("Standard")); material.color=new Color(.12f,.08f,.04f);
+            var vehicle=new GameObject("DE6 sloped roof fixture");
+            var roof=GameObject.CreatePrimitive(PrimitiveType.Cube);roof.transform.SetParent(vehicle.transform);
+            roof.transform.localPosition=new Vector3(0,2,0);roof.transform.localScale=new Vector3(3,.2f,5);
+            roof.transform.localRotation=Quaternion.Euler(0,0,50);roof.GetComponent<Renderer>().sharedMaterial=material;
+            var sun=new GameObject("Sun").AddComponent<Light>();sun.type=LightType.Directional;
+            sun.transform.rotation=Quaternion.Euler(60,-30,0);sun.intensity=1;
+            var modPath=Path.Combine(root,"artifacts/build/DVSeasons");
+            var assembly=Assembly.LoadFrom(Path.Combine(modPath,"DVSeasons.dll"));
+            var repositoryType=assembly.GetType("DVSeasons.Mod.SeasonAssetBundleRepository",true);
+            var repository=Activator.CreateInstance(repositoryType,new object[]{modPath});
+            // The editor method has no player loop for async loading; inject a
+            // ready bundle only into this fixture, keeping production asynchronous.
+            var bundle=AssetBundle.LoadFromFile(Path.Combine(modPath,"AssetBundles/dvseasons_dv99"));
+            repositoryType.GetProperty("Bundle").GetSetMethod(true).Invoke(repository,new object[]{bundle});
+            var type=assembly.GetType("DVSeasons.Mod.ProceduralSnowController",true);
+            controller=Activator.CreateInstance(type,new[]{repository});apply=type.GetMethod("Apply");
+            type.GetMethod("SetWeather").Invoke(controller,new object[]{1f});
+            var registry=type.GetField("vehicles",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(controller);
+            registry.GetType().GetMethod("Register").Invoke(registry,new object[]{vehicle.transform,null,null});
+            type.GetMethod("SetVehicleSaveIdentity").Invoke(controller,new object[]{new Func<Component,string>(source=>"fixture-car-guid")});
+            try
+            {
+                var bare=Capture(0,"roof-bare");
+                for(int i=0;i<4;i++) {apply.Invoke(controller,new object[]{1f,true});camera.Render();}
+                var covered=Capture(1,"roof-snow");
+                var point=roof.transform.TransformPoint(new Vector3(0,.5f,0));
+                float gain=Sample(covered,point)-Sample(bare,point);
+                Require(gain>.15f,"Sloped vehicle roof failed snow coverage: "+gain);
+                Debug.Log("DVSeasons roof GPU regression passed: 50 degree roof coverage gain="+gain);
+                VerifySavedSnow(assembly,type,registry,vehicle);
+                var distantGround=GameObject.CreatePrimitive(PrimitiveType.Cube);
+                distantGround.transform.position=new Vector3(0,-.25f,2400);
+                distantGround.transform.localScale=new Vector3(500,.5f,500);
+                distantGround.GetComponent<Renderer>().sharedMaterial=material;
+                camera.farClipPlane=5000;camera.transform.position=new Vector3(0,800,0);camera.transform.LookAt(new Vector3(0,0,2400));
+                type.GetMethod("SetWeather").Invoke(controller,new object[]{1f});type.GetMethod("InvalidateGeometry").Invoke(controller,null);
+                var farBare=Capture(0,"distant-bare");
+                for(int i=0;i<6;i++) {apply.Invoke(controller,new object[]{1f,true});camera.Render();}
+                var farSnow=Capture(1,"distant-snow");
+                float farGain=Sample(farSnow,new Vector3(0,0,2400))-Sample(farBare,new Vector3(0,0,2400));
+                Require(farGain>.15f,"Dynamic snow was culled beyond old 1km limit: "+farGain);
+                Debug.Log("DVSeasons distant snow GPU verified at 2.4km: coverage gain="+farGain);
+                UnityEngine.Object.DestroyImmediate(farBare);UnityEngine.Object.DestroyImmediate(farSnow);
+                UnityEngine.Object.DestroyImmediate(bare);UnityEngine.Object.DestroyImmediate(covered);
+            }
+            finally {((IDisposable)controller).Dispose();((IDisposable)repository).Dispose();}
+        }
+
+        private static void VerifySavedSnow(Assembly assembly,Type type,object registry,GameObject vehicle)
+        {
+            var rails=type.GetField("RailTracks").GetValue(controller);
+            var railType=rails.GetType();
+            railType.GetField("WorldOffset").SetValue(rails,new Vector3(1000,0,2000));
+            railType.GetMethod("WheelAt").Invoke(rails,new object[]{1,new Vector3(1010,0,2020),Vector3.right,Vector3.forward});
+            railType.GetMethod("WheelAt").Invoke(rails,new object[]{1,new Vector3(1010,0,2024),Vector3.right,Vector3.forward});
+            railType.GetMethod("Advance").Invoke(rails,new object[]{1f,30f});
+            var stateType=assembly.GetType("DVSeasons.Mod.SnowWorldSave",true);
+            var state=Activator.CreateInstance(stateType);
+            type.GetMethod("SaveSnow").Invoke(controller,new[]{state});
+            var masks=(System.Collections.IList)stateType.GetField("VehicleMasks").GetValue(state);
+            Require(masks.Count==1,"Vehicle snow mask not saved asynchronously");
+            var before=(byte[])masks[0].GetType().GetMethod("Unpack").Invoke(masks[0],null);
+            // A unique half-float value cannot be reproduced by rebuilding an
+            // all-white mask. This proves actual restoration, not coincidence.
+            before[65536]=0;before[65537]=0x38;
+            masks[0].GetType().GetField("Packed").SetValue(masks[0],null);
+            var records=(System.Collections.IList)stateType.GetField("Rails").GetValue(state);
+            Require(records.Count>0,"Wheel traces missing from save");
+            string encoded=(string)stateType.GetMethod("Encode").Invoke(state,null);
+            File.WriteAllText(Path.Combine(directory,"snow-state.base64"),encoded);
+            state=stateType.GetMethod("Decode").Invoke(null,new object[]{encoded});
+            ((IDisposable)controller).Dispose();
+            type.GetMethod("RestoreSnow").Invoke(controller,new[]{state});
+            type.GetMethod("SetWeather").Invoke(controller,new object[]{0f});
+            registry.GetType().GetMethod("Register").Invoke(registry,new object[]{vehicle.transform,null,null});
+            for(int i=0;i<5;i++) { apply.Invoke(controller,new object[]{.2f,true});camera.Render(); }
+            Require(Math.Abs((float)type.GetProperty("Coverage").GetValue(controller,null)-1f)<.001f,"Dry load replaced saved coverage");
+            var texture=(RenderTexture)registry.GetType().GetField("snow",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(registry);
+            var read=AsyncGPUReadback.Request(texture,0,0,256,0,256,0,1);read.WaitForCompletion();
+            Require(!read.hasError,"Saved mask verification readback failed");
+            var after=read.GetData<byte>().ToArray();
+            Require(before.Length==after.Length,"Saved mask byte length changed");
+            for(int i=0;i<before.Length;i++) Require(before[i]==after[i],"Restored vehicle snow differs at byte "+i);
+            var restored=Activator.CreateInstance(stateType);type.GetMethod("SaveSnow").Invoke(controller,new[]{restored});
+            var loadedRecords=(System.Collections.IList)stateType.GetField("Rails").GetValue(restored);
+            Require(records.Count==loadedRecords.Count,"Restored trace count differs: "+records.Count+" -> "+loadedRecords.Count);
+            float age=(float)loadedRecords[0].GetType().GetField("Age").GetValue(loadedRecords[0]);
+            Require(Math.Abs(age-1f/6)<.001f,"Dry weather aged a saved wheel trace");
+            railType.GetMethod("Advance").Invoke(rails,new object[]{1f,180f});
+            var refilled=Activator.CreateInstance(stateType);type.GetMethod("SaveSnow").Invoke(controller,new[]{refilled});
+            Require(((System.Collections.IList)stateType.GetField("Rails").GetValue(refilled)).Count==0,"Snowfall did not refill saved traces");
+            Debug.Log("DVSeasons snow save GPU verified: lossless vehicle mask, stable-origin rail marks, dry pause, snowfall refill and restored coverage.");
+        }
+
         public static void Verify()
+        { VerifySurface(true); }
+
+        public static void VerifySurfaceCore()
+        { VerifySurface(false); }
+
+        private static void VerifySurface(bool extended)
         {
             var root = Path.GetFullPath(Path.Combine(Application.dataPath,"../.."));
             directory = Path.Combine(root,"artifacts/verification/0.2.26");
@@ -51,6 +295,9 @@ namespace DVSeasons.AssetBundleBuild
             var repositoryType=assembly.GetType("DVSeasons.Mod.SeasonAssetBundleRepository",true);
             var repository=Activator.CreateInstance(repositoryType,new object[]{modPath});
             var type=assembly.GetType("DVSeasons.Mod.ProceduralSnowController",true);
+            // executeMethod has no player loop for the asynchronous bundle load.
+            var bundle=AssetBundle.LoadFromFile(Path.Combine(modPath,"AssetBundles/dvseasons_dv99"));
+            repositoryType.GetProperty("Bundle").GetSetMethod(true).Invoke(repository,new object[]{bundle});
             controller=Activator.CreateInstance(type,new[]{repository});
             apply=type.GetMethod("Apply");
             type.GetMethod("SetWeather").Invoke(controller,new object[]{1f});
@@ -58,6 +305,9 @@ namespace DVSeasons.AssetBundleBuild
             try
             {
                 var baseline=Capture(0,"snow-0");
+                // Exposure maps are staged across frames. Let the two required
+                // maps finish before comparing partial and full snow coverage.
+                for(int i=0;i<4;i++) {apply.Invoke(controller,new object[]{.5f,true});camera.Render();}
                 var middle=Capture(0.5f,"snow-50");
                 var winter=Capture(1,"snow-100");
                 var thaw=Capture(0,"snow-thaw");
@@ -90,6 +340,7 @@ namespace DVSeasons.AssetBundleBuild
                 apply.Invoke(controller,new object[]{1f,false}); camera.Render();
                 Require(camera.GetCommandBuffers(CameraEvent.BeforeReflections).Length==0,"Disable left camera commands attached.");
                 ((IDisposable)controller).Dispose();
+                for(int i=0;i<4;i++) {apply.Invoke(controller,new object[]{1f,true});camera.Render();}
                 var reloaded=Capture(1,"snow-reloaded");
                 Require(Sample(reloaded,floor)>Sample(baseline,floor)+0.12f,"Session reload lost snow.");
                 camera.allowHDR=false;
@@ -98,6 +349,13 @@ namespace DVSeasons.AssetBundleBuild
                 var ldrBase=Capture(0,"snow-ldr-0"); var ldrWinter=Capture(1,"snow-ldr-100");
                 Require(Sample(ldrWinter,floor)>Sample(ldrBase,floor)+0.10f,"LDR snow failed.");
                 camera.allowHDR=true; camera.targetTexture=target; UnityEngine.Object.DestroyImmediate(ldrTarget);
+                if(!extended)
+                {
+                    foreach(var texture in new[]{baseline,middle,winter,thaw,night,reloaded,ldrBase,ldrWinter})
+                        UnityEngine.Object.DestroyImmediate(texture);
+                    Debug.Log("DVSeasons surface core GPU verification passed: ground/roof, shelter, vertical walls, partial cover, thaw, darkness, disable/reload, HDR/LDR.");
+                    return;
+                }
                 var terrainData=new TerrainData { heightmapResolution=33,size=new Vector3(4,2,4) };
                 var terrainHeights=new float[33,33];
                 for(var y=0;y<33;y++) for(var x=0;x<33;x++) terrainHeights[y,x]=0.5f;
@@ -109,7 +367,9 @@ namespace DVSeasons.AssetBundleBuild
                 terrainData.terrainLayers=new[]{terrainLayer};
                 terrain.drawInstanced=true;
                 ((IDisposable)controller).Dispose();
-                var terrainBare=Capture(0,"terrain-0"); var terrainSnow=Capture(1,"terrain-100");
+                var terrainBare=Capture(0,"terrain-0");
+                for(int i=0;i<4;i++) {apply.Invoke(controller,new object[]{1f,true});camera.Render();}
+                var terrainSnow=Capture(1,"terrain-100");
                 var terrainPoint=new Vector3(3,1.5f,-3);
                 // A white terrain layer makes brightness an unreliable snow signal;
                 // check that the overlay also updates its near exposure map correctly.

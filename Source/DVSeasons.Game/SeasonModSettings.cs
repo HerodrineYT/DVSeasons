@@ -1,4 +1,4 @@
-﻿using DVSeasons.Core;
+using DVSeasons.Core;
 using UnityModManagerNet;
 
 namespace DVSeasons.Mod
@@ -15,6 +15,11 @@ namespace DVSeasons.Mod
         public float SavedPhase;
         public bool SnowParticlesEnabled = true;
         public float SnowfallDensity = 1f;
+        public float SnowGlareReduction = 1f;
+        // Default to the unlimited (rightmost) position of the leaf slider.
+        public int AutumnLeafLimit = 0;
+        public bool InsectsEnabled = true;
+        public bool WinterWindowsEnabled = true;
         // Retained only for settings-file compatibility. Snowfall now follows the
         // native WeatherDriver.RainValue exclusively.
         public float AmbientWinterSnowfall;
@@ -70,8 +75,13 @@ namespace DVSeasons.Mod
 
         public void Clamp()
         {
+            if (float.IsNaN(SnowGlareReduction) || float.IsInfinity(SnowGlareReduction)) SnowGlareReduction = 1f;
+            SnowGlareReduction = System.Math.Max(0f, System.Math.Min(2f, SnowGlareReduction));
             // These features are part of the default visual/physics profile. They are
             // intentionally not exposed in the compact settings UI anymore.
+            if (AutumnLeafLimit < 0) AutumnLeafLimit = 0;
+            if (AutumnLeafLimit > 20000) AutumnLeafLimit = 20000;
+            if (AutumnLeafLimit > 0 && AutumnLeafLimit < 100) AutumnLeafLimit = 100;
             SnowParticlesEnabled = true;
             GroundSnowEnabled = true;
             SeasonalTexturesEnabled = true;

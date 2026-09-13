@@ -5,7 +5,10 @@ namespace DVSeasons.Core
     public sealed class SeasonCycle
     {
         private static readonly float[] SnowProfile = { 0f, 0f, 0f, 1f };
-        private static readonly float[] TemperatureProfile = { 10f, 24f, 8f, -8f };
+        // Keep climate synchronized with the phase model: temperatures are sampled
+        // from the same four seasonal anchors and eased during the configured
+        // transition window (including the short autumn slide into winter).
+        private static readonly float[] TemperatureProfile = { 10f, 30f, 8f, -30f };
         private SeasonSettingsSnapshot settings;
         private double phase;
 
@@ -58,7 +61,18 @@ namespace DVSeasons.Core
 
             var snow = Lerp(SnowProfile[currentIndex], SnowProfile[nextIndex], transition);
             var temperature = Lerp(TemperatureProfile[currentIndex], TemperatureProfile[nextIndex], transition);
-            var wetness = settings.WinterAdhesionEnabled ? snow * settings.WinterWetnessEquivalent : 0f;
+            var wetness = 0f;
+            if (settings.WinterAdhesionEnabled)
+            {
+                var winterWetness = snow * settings.WinterWetnessEquivalent;
+                var autumnWetness = AutumnEffectsProfile.WetnessEquivalent *
+                    AutumnEffectsProfile.GetWeight((SeasonKind)currentIndex,
+                        (SeasonKind)nextIndex, transition);
+                // Keep the established snow curve while adding only a very small
+                // dry-autumn adhesion loss. The existing network field carries the
+                // final value, so multiplayer needs no protocol change.
+                wetness = Math.Max(winterWetness, autumnWetness);
+            }
             return new SeasonState(phase, (SeasonKind)currentIndex, (SeasonKind)nextIndex, transition,
                 snow, temperature, wetness);
         }

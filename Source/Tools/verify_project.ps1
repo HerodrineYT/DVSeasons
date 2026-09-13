@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param([switch]$RequireBuildOutput)
 
 $ErrorActionPreference = 'Stop'
@@ -15,6 +15,7 @@ $required = @(
     'Resources\Runtime\Textures\winter_ballast_balanced.png',
     'Resources\Runtime\Audio\snow_step_1.wav',
     'Resources\Runtime\Audio\snow_step_2.wav',
+    'Resources\Runtime\Audio\spring_bees.wav',
     'Resources\Runtime\Textures\Seasonal\autumn\SleeperNew_d.png',
     'Resources\Runtime\Textures\Seasonal\autumn\SleeperOld_d.png',
     'Resources\Runtime\Textures\Seasonal\winter\SleeperNew_d.png',
@@ -41,11 +42,22 @@ $required = @(
     'DVSeasons.Game\SnowVehicleRegistry.cs',
     'DVSeasons.Game\RailSnowTracks.cs',
     'DVSeasons.Game\RailSnowGameSource.cs',
+    'DVSeasons.Common\AutumnEffectsProfile.cs',
+    'DVSeasons.Common\SeasonalThermalProfile.cs',
+    'DVSeasons.Game\AutumnLeafParticleTexture.cs',
+    'DVSeasons.Game\AutumnLeafGroundController.cs',
+    'DVSeasons.Game\AutumnTreeSourceProvider.cs',
+    'DVSeasons.Game\SeasonalThermalController.cs',
+    'DVSeasons.Tests\SeasonalThermalProfileTests.cs',
+    'DVSeasons.Game\SnowFootstepAudioController.cs',
+    'DVSeasons.Game\StreamingTextureReadiness.cs',
     'DVSeasons.Unity\Assets\DVSeasons\DV99\Shaders\SnowVehicle.shader',
     'DVSeasons.Unity\Assets\Editor\DVSeasonsAssetBundleBuilder.cs',
+    'DVSeasons.Unity\Assets\Editor\StreamingTextureReadinessVerification.cs',
     'DVSeasons.Unity\ProjectSettings\ProjectVersion.txt',
     'Docs\BUILDING.md',
-    'Docs\PROJECT_STRUCTURE.md'
+    'Docs\PROJECT_STRUCTURE.md',
+    'Docs\SEASONAL_THERMAL_PHYSICS.md'
 )
 
 $newWinterSurfaces = @(
@@ -70,6 +82,118 @@ foreach ($relativePath in $required) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required project file is missing: $relativePath"
     }
+}
+
+$visualControllerSource = Get-Content -LiteralPath (Join-Path $projectRoot 'DVSeasons.Game\SeasonVisualController.cs') -Raw
+if ($visualControllerSource -match 'startupNotBefore|Seasonal visuals deferred for') {
+    throw 'SeasonVisualController still contains a fixed startup delay for streamed textures.'
+}
+$leafCoverSource = Get-Content -LiteralPath (Join-Path $projectRoot 'DVSeasons.Game\AutumnLeafGroundController.cs') -Raw
+if ($leafCoverSource -notmatch 'GetTreeInstance' -or $leafCoverSource -match '\.treeInstances') {
+    throw 'Autumn leaf cover must use bounded point probes without copying the full Terrain tree array.'
+}
+$treeSourceProvider = Get-Content -LiteralPath (Join-Path $projectRoot 'DVSeasons.Game\AutumnTreeSourceProvider.cs') -Raw
+foreach ($safeVspMarker in @('OnRenderCompleteDelegate', 'Prepared', 'LoadedDistanceBand == 99',
+    'LoadStateList.IsCreated', 'matrixList.IsCreated', 'FloatingOriginOffset')) {
+    if ($treeSourceProvider -notmatch [Regex]::Escape($safeVspMarker)) {
+        throw "Vegetation Studio tree source is missing safe-read marker '$safeVspMarker'."
+    }
+}
+if ($treeSourceProvider -match 'CompleteCellLoading|GetVegetationItemInstances|OriginShift\.currentMove') {
+    throw 'Vegetation Studio tree source must not force job completion or apply DV origin shift twice.'
+}
+$gameProjectSource = Get-Content -LiteralPath (Join-Path $projectRoot 'DVSeasons.Game\DVSeasons.Game.csproj') -Raw
+foreach ($vspReference in @('AwesomeTechnologies.VegetationStudioPro.Runtime', 'Unity.Collections')) {
+    if ($gameProjectSource -notmatch [Regex]::Escape($vspReference)) {
+        throw "Game project is missing Vegetation Studio dependency '$vspReference'."
+    }
+}
+$readinessSource = Get-Content -LiteralPath (Join-Path $projectRoot 'DVSeasons.Game\StreamingTextureReadiness.cs') -Raw
+foreach ($requiredApi in @('requestedMipmapLevel', 'IsRequestedMipmapLevelLoaded', 'loadedMipmapLevel')) {
+    if ($readinessSource -notmatch [Regex]::Escape($requiredApi)) {
+        throw "Streaming texture readiness guard does not use Unity API '$requiredApi'."
+    }
+}
+$autumnProfileSource = Get-Content -LiteralPath (Join-Path $projectRoot 'DVSeasons.Common\AutumnEffectsProfile.cs') -Raw
+foreach ($requiredCurve in @('WetnessEquivalent = 0.005f', 'GetLeafEmissionRate',
+    'GetHiddenLeafIngressRate', 'IsHiddenLeafIngressSource', 'GetTrainWakeStrength')) {
+    if ($autumnProfileSource -notmatch [Regex]::Escape($requiredCurve)) {
+        throw "Autumn effects profile is missing '$requiredCurve'."
+    }
+}
+$forbiddenLeafFallback = 'if (!exactCanopy) canopyPosition'
+if ($visualControllerSource -match [Regex]::Escape($forbiddenLeafFallback) -or
+    $visualControllerSource -match 'TrainLeafReactionController') {
+    throw 'The obsolete sky fallback or train-tail leaf emitter is still connected.'
+}
+foreach ($requiredBehavior in @('InitialCapacity = 2200', 'EnsureCapacity', 'int.MaxValue',
+    'MaximumHiddenWindSpawnsPerFrame = 2', 'MaximumSources = 96',
+    'InitialCoverCreditPerSource = 10f', 'MaximumCoverGrowthPerSecond = 72f',
+    'surfaceQueriesRemaining = 10', 'PopulationRaycastsPerFrame = 5',
+    'GetTreeInstance', 'Physics.Raycast', 'Physics.SphereCast',
+    'OriginShift.currentMove', 'GetTrainWakeStrength', 'SetParticles', 'ParticleSystemRenderMode.Mesh',
+    'EnsureTreeSourceProvider', 'treeSourceProvider = null',
+    'GroundLitterSpreadRadius = 11f', 'SurfaceLocalPosition', 'InverseTransformPoint',
+    'UpdateAnchoredLeaves(worldOffset, deltaTime)', 'ClearSurfaceAnchor', 'SurfaceVelocity',
+    'TryGetRollingStockSurfaceProbe', 'EmitHiddenWindIngress', 'WorldToViewportPoint',
+    'renderer.maxParticleSize = 0.5f', 'mesh.UploadMeshData(false)')) {
+    if ($leafCoverSource -notmatch [Regex]::Escape($requiredBehavior)) {
+        throw "Physical autumn leaf cover is missing '$requiredBehavior'."
+    }
+}
+if ($leafCoverSource -match [Regex]::Escape('mesh.UploadMeshData(true)')) {
+    throw 'The autumn leaf mesh must remain CPU-readable for ParticleSystemRenderer.'
+}
+$anchorUpdateIndex = $leafCoverSource.IndexOf('UpdateAnchoredLeaves(worldOffset, deltaTime)',
+    [StringComparison]::Ordinal)
+$leafPruneIndex = $leafCoverSource.IndexOf('PruneDistantLeaves(cameraPosition)',
+    [StringComparison]::Ordinal)
+if ($anchorUpdateIndex -lt 0 -or $leafPruneIndex -lt 0 -or $anchorUpdateIndex -gt $leafPruneIndex) {
+    throw 'Moving leaf surfaces must be updated before distance pruning.'
+}
+$ordinaryLeafIndex = $leafCoverSource.IndexOf('EmitFallingLeaves(state, cameraPosition',
+    [StringComparison]::Ordinal)
+$hiddenLeafIndex = $leafCoverSource.IndexOf('EmitHiddenWindIngress(state, camera',
+    [StringComparison]::Ordinal)
+$simulateLeafIndex = $leafCoverSource.IndexOf('SimulateLeaves(weight, cameraPosition',
+    [StringComparison]::Ordinal)
+if ($ordinaryLeafIndex -lt 0 -or $hiddenLeafIndex -lt 0 -or $simulateLeafIndex -lt 0 -or
+    $ordinaryLeafIndex -gt $hiddenLeafIndex -or $simulateLeafIndex -gt $ordinaryLeafIndex) {
+    throw 'Surface checks for airborne leaves must precede emission; hidden wind ingress uses the budget remaining after ordinary emission.'
+}
+if ($leafCoverSource -match 'if\s*\(car\s*!=\s*null\)\s*continue') {
+    throw 'Train surfaces are still excluded from autumn leaf placement.'
+}
+$leafMeshDepths = [Regex]::Matches($leafCoverSource,
+    'new Vector3\([^\r\n]*,\s*(0\.\d+)f\)') | ForEach-Object {
+        [double]$_.Groups[1].Value
+    }
+if (@($leafMeshDepths | Where-Object { $_ -ge 0.075 }).Count -lt 3) {
+    throw 'Autumn leaf mesh is missing its curved centre ridge.'
+}
+$thermalSource = Get-Content -LiteralPath (Join-Path $projectRoot 'DVSeasons.Game\SeasonalThermalController.cs') -Raw
+foreach ($thermalMarker in @('PassiveCooler', 'ActiveCooler', 'AutomaticCooler',
+    'DirectionalMovementCooler', 'HeatReservoir', 'SimulateSteamConsumption',
+    'ComputeTemperature', 'UpdateTemperature', 'UnpatchAll(HarmonyId)')) {
+    if ($thermalSource -notmatch [Regex]::Escape($thermalMarker)) {
+        throw "Seasonal locomotive thermal physics is missing '$thermalMarker'."
+    }
+}
+$runtimeSource = Get-Content -LiteralPath (Join-Path $projectRoot 'DVSeasons.Game\SeasonRuntime.cs') -Raw
+foreach ($thermalLifecycle in @('thermal.Apply(currentState.TemperatureCelsius, HasLocalAuthority())', 'thermal.Reset()',
+    'thermal.Dispose()')) {
+    if ($runtimeSource -notmatch [Regex]::Escape($thermalLifecycle)) {
+        throw "Season runtime is missing thermal lifecycle call '$thermalLifecycle'."
+    }
+}
+$footstepSource = Get-Content -LiteralPath (Join-Path $projectRoot 'DVSeasons.Game\SnowFootstepAudioController.cs') -Raw
+foreach ($requiredCabCheck in @('TrainCar.Resolve', 'cabTeleportDestination', 'ClosestPoint', 'HasLowShelter')) {
+    if ($footstepSource -notmatch [Regex]::Escape($requiredCabCheck)) {
+        throw "Snow footstep cab exclusion is missing '$requiredCabCheck'."
+    }
+}
+if ($footstepSource -match 'player\.IsChildOf\(candidate\)|candidate\.root\s*==\s*playerRoot') {
+    throw 'Snow footstep shelter still discards cab geometry after player reparenting.'
 }
 
 $metadata = Get-Content -LiteralPath (Join-Path $projectRoot 'DVSeasons.Game\info.source.json') -Raw | ConvertFrom-Json

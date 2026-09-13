@@ -15,10 +15,17 @@ namespace DVSeasons.AssetBundleBuild
             var assembly = Assembly.LoadFrom(Path.Combine(modPath, "DVSeasons.dll"));
             var core = Assembly.LoadFrom(Path.Combine(modPath, "DVSeasons.Core.dll"));
             var repositoryType = assembly.GetType("DVSeasons.Mod.SeasonAssetBundleRepository", true);
+            var controllerType = assembly.GetType("DVSeasons.Mod.SeasonalTextureController", true);
             var setType = assembly.GetType("DVSeasons.Mod.SeasonalTextureController+SeasonalTextureSet", true);
             var categoryType = assembly.GetType("DVSeasons.Mod.SeasonalTextureController+TextureCategory", true);
             var seasonType = core.GetType("DVSeasons.Core.SeasonKind", true);
             var stateType = core.GetType("DVSeasons.Core.SeasonState", true);
+            VerifyVegetationClassification(controllerType, categoryType,
+                "T_beech_forest_stumps_01_BC_SM", "Bark");
+            VerifyVegetationClassification(controllerType, categoryType,
+                "T_beech_atlas_BC v2", "Foliage");
+            if (Shader.Find("Sprites/Default") == null)
+                throw new Exception("Sprites/Default shader required by physical autumn leaves is unavailable.");
             var repository = Activator.CreateInstance(repositoryType, new object[] { modPath });
             var sheet = new Texture2D(512, 256, TextureFormat.RGBA32, false);
             try
@@ -83,12 +90,26 @@ namespace DVSeasons.AssetBundleBuild
                     row++;
                 }
                 sheet.Apply();
-                var directory = Path.Combine(root, "artifacts/verification/0.2.12");
+                var directory = Path.Combine(root, "artifacts/verification/0.3.10");
                 Directory.CreateDirectory(directory);
                 File.WriteAllBytes(Path.Combine(directory, "surface-snow-stages.png"), sheet.EncodeToPNG());
                 Debug.Log("DVSeasons surface snow verified: real runtime chunks, 0/28/62/100%, exact thaw, unchanged alpha and restored originals.");
             }
             finally { ((IDisposable)repository).Dispose(); UnityEngine.Object.DestroyImmediate(sheet); }
+        }
+
+        private static void VerifyVegetationClassification(Type controllerType, Type categoryType,
+            string description, string expectedCategory)
+        {
+            var method = controllerType.GetMethod("TryClassifyVegetation",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            if (method == null) throw new Exception("Vegetation classifier was not found.");
+            var arguments = new object[] { description, Activator.CreateInstance(categoryType) };
+            var accepted = (bool)method.Invoke(null, arguments);
+            if (!accepted || !string.Equals(arguments[1].ToString(), expectedCategory,
+                StringComparison.Ordinal))
+                throw new Exception("Vegetation classifier mapped '" + description + "' to '" +
+                    arguments[1] + "' instead of '" + expectedCategory + "'.");
         }
     }
 }

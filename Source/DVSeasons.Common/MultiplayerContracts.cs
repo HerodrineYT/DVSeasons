@@ -5,7 +5,7 @@ namespace DVSeasons.Core
 {
     public sealed class SeasonNetworkState
     {
-        public const int CurrentProtocol = 6;
+        public const int CurrentProtocol = 8;
         public int Protocol { get; set; }
         public uint Sequence { get; set; }
         public double Phase { get; set; }
@@ -23,6 +23,9 @@ namespace DVSeasons.Core
         public float WindVelocityX { get; set; }
         public float WindVelocityZ { get; set; }
         public float SnowLightFactor { get; set; }
+        public uint SeasonSelectionRevision { get; set; }
+        public bool HasSurfaceSnowCoverage { get; set; }
+        public float SurfaceSnowCoverage { get; set; }
 
         public static SeasonNetworkState FromState(SeasonState state, float daysPerSeason = 1f,
             float transitionDays = 1f, float rainIntensity = 0f, float windVelocityX = 0f,
@@ -66,7 +69,8 @@ namespace DVSeasons.Core
                 IsFiniteInRange(RainIntensity, 0f, 1f) &&
                 IsFiniteInRange(WindVelocityX, -20f, 20f) &&
                 IsFiniteInRange(WindVelocityZ, -20f, 20f) &&
-                IsFiniteInRange(SnowLightFactor, 0f, 1f);
+                IsFiniteInRange(SnowLightFactor, 0f, 1f) &&
+                IsFiniteInRange(SurfaceSnowCoverage, 0f, 1f);
         }
 
         public void WriteTo(BinaryWriter writer)
@@ -89,14 +93,21 @@ namespace DVSeasons.Core
             writer.Write(WindVelocityX);
             writer.Write(WindVelocityZ);
             writer.Write(SnowLightFactor);
+            writer.Write(SeasonSelectionRevision);
+            writer.Write(HasSurfaceSnowCoverage);
+            writer.Write(SurfaceSnowCoverage);
         }
 
         public static SeasonNetworkState ReadFrom(BinaryReader reader)
         {
             if (reader == null) throw new ArgumentNullException(nameof(reader));
+            int protocol = reader.ReadInt32();
+            // Mixed versions must be rejected without reading past the end of
+            // an older packet and flooding MP's deserializer with exceptions.
+            if (protocol != CurrentProtocol) return new SeasonNetworkState { Protocol = protocol };
             return new SeasonNetworkState
             {
-                Protocol = reader.ReadInt32(),
+                Protocol = protocol,
                 Sequence = reader.ReadUInt32(),
                 Phase = reader.ReadDouble(),
                 Current = (SeasonKind)reader.ReadByte(),
@@ -112,7 +123,10 @@ namespace DVSeasons.Core
                 RainIntensity = reader.ReadSingle(),
                 WindVelocityX = reader.ReadSingle(),
                 WindVelocityZ = reader.ReadSingle(),
-                SnowLightFactor = reader.ReadSingle()
+                SnowLightFactor = reader.ReadSingle(),
+                SeasonSelectionRevision = reader.ReadUInt32(),
+                HasSurfaceSnowCoverage = reader.ReadBoolean(),
+                SurfaceSnowCoverage = reader.ReadSingle()
             };
         }
 

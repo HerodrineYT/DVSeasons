@@ -99,6 +99,18 @@ namespace UnityModManagerNet
 
 namespace DVSeasons.Mod
 {
+    internal sealed class SeasonalThermalController : IDisposable
+    {
+        public static float LastApplied = float.NaN;
+        public static int ResetCount;
+        public static bool SimulateLocally;
+        public void EnableLampProtection() { }
+        public void DisableLampProtection() { }
+        public void Apply(float temperature, bool simulateLocally = true) { LastApplied = temperature; SimulateLocally = simulateLocally; }
+        public void Reset() { LastApplied = float.NaN; ResetCount++; }
+        public void Dispose() { }
+    }
+
     internal sealed class MultiplayerLogSpamFilter : IDisposable
     {
         public void Enable() { }
@@ -107,7 +119,16 @@ namespace DVSeasons.Mod
     }
     internal sealed class WeatherAdapter : IDisposable
     {
+        public SeasonState WithAirTemperature(SeasonState state) { return state; }
         public static DateTime? Clock;
+        public static int AdhesionApplyCount;
+        public static int ThunderApplyCount;
+        public static SeasonState LastAdhesionState;
+        public static SeasonState LastThunderState;
+        public static SeasonState LastClimateState;
+        public static int SeasonResetCount, SeasonRefreshCount;
+        public static float DayMinutes = 60;
+        public static bool WetnessOverridden, ThunderOverridden, DayOverridden;
         public bool IsReady { get { return Clock.HasValue; } }
         public float RainIntensity { get { return 0f; } }
         public UnityEngine.Vector3 SnowWindVelocity { get { return new UnityEngine.Vector3 { x = 0, y = 0, z = 0 }; } }
@@ -115,10 +136,33 @@ namespace DVSeasons.Mod
         public void TickProbe() { }
         public bool TryGetGameDateTime(out DateTime time) { time = Clock.GetValueOrDefault(); return Clock.HasValue; }
         public void ResetForSession() { }
-        public void ApplyWinterAdhesion(SeasonState state, bool enabled, bool respectOtherMods) { }
+        public static void ResetAppliedOverrides()
+        {
+            AdhesionApplyCount = 0;
+            ThunderApplyCount = 0;
+            LastAdhesionState = null;
+            LastThunderState = null;
+            LastClimateState = null;
+            SeasonResetCount = SeasonRefreshCount = 0;
+        }
+        public void ApplyWinterAdhesion(SeasonState state, bool enabled, bool respectOtherMods)
+        {
+            AdhesionApplyCount++;
+            LastAdhesionState = state;
+        }
         public void ApplySeasonalPrecipitation(SeasonState state, bool enabled) { }
-        public void ApplySeasonalClimate(SeasonState state, bool daylight, bool weather) { }
-        public void ApplyWinterThunderSuppression(SeasonState state, bool enabled) { }
+        public void ApplySeasonalClimate(SeasonState state, bool daylight, bool weather) { LastClimateState = state; }
+        public void ResetSeasonEffects()
+        {
+            SeasonResetCount++;
+            DayMinutes = 60; DayOverridden = WetnessOverridden = ThunderOverridden = false;
+        }
+        public void RefreshSeasonWeather() { SeasonRefreshCount++; }
+        public void ApplyWinterThunderSuppression(SeasonState state, bool enabled)
+        {
+            ThunderApplyCount++;
+            LastThunderState = state;
+        }
         public void Dispose() { }
     }
 
@@ -128,13 +172,30 @@ namespace DVSeasons.Mod
         public void Dispose() { }
     }
 
+    internal sealed class CabHeaterService : IDisposable
+    {
+        public CabHeaterService(DVSeasons.Core.ISeasonNetworkBridge bridge) { }
+        public void StartSession(SaveGameData data) { }
+        public void EndSession() { }
+        public void Save(SaveGameData data) { }
+        public void Tick() { }
+        public void Dispose() { }
+    }
     internal sealed class SeasonVisualController : IDisposable
     {
         public static int ResetCount;
+        public static int SelectionCount;
+        public static float? LastHostCoverage;
+        public float? SurfaceSnowCoverage => null;
+        public void SetNetworkSnowCoverage(float? coverage) { LastHostCoverage = coverage; }
+        public static SaveGameData SnowRestoredFrom, SnowWrittenTo;
         public static SeasonState LastApplied;
         private bool disposed;
         public SeasonVisualController(string path) { }
         public void BeginSession(bool multiplayerSession) { }
+        public void RestoreSnow(SaveGameData data) { SnowRestoredFrom=data; }
+        public void SaveSnow(SaveGameData data) { SnowWrittenTo=data; }
+        public void OnSeasonSelected() { SelectionCount++; }
         public void ResetForSession() { ResetCount++; LastApplied = null; }
         public void Apply(SeasonState state, float snow, float rain, UnityEngine.Vector3 wind,
             float light, SeasonModSettings settings)

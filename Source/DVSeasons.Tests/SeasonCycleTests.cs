@@ -29,12 +29,182 @@ namespace DVSeasons.Tests
         }
 
         [Fact]
+        public void AutumnAddsOnlyVerySmallAdhesionLoss()
+        {
+            var enabled = new SeasonCycle(new SeasonSettingsSnapshot(true, 14f, 3f,
+                SeasonKind.Autumn, true, 0.45f), 2d).GetState();
+            var disabled = new SeasonCycle(new SeasonSettingsSnapshot(true, 14f, 3f,
+                SeasonKind.Autumn, false, 0.45f), 2d).GetState();
+
+            Assert.Equal(AutumnEffectsProfile.WetnessEquivalent,
+                enabled.WinterWetnessEquivalent);
+            Assert.Equal(0f, disabled.WinterWetnessEquivalent);
+        }
+
+        [Fact]
+        public void AutumnEffectsFadeAtBothSeasonBoundaries()
+        {
+            var summer = new SeasonState(1d, SeasonKind.Summer, SeasonKind.Autumn,
+                0f, 0f, 30f, 0f);
+            var entering = new SeasonState(1.9d, SeasonKind.Summer, SeasonKind.Autumn,
+                0.4f, 0f, 20f, 0f);
+            var autumn = new SeasonState(2d, SeasonKind.Autumn, SeasonKind.Winter,
+                0f, 0f, 8f, 0f);
+            var leaving = new SeasonState(2.9d, SeasonKind.Autumn, SeasonKind.Winter,
+                0.75f, 0.75f, -20f, 0.3f);
+
+            Assert.Equal(0f, AutumnEffectsProfile.GetWeight(summer));
+            Assert.InRange(AutumnEffectsProfile.GetWeight(entering), 0.399f, 0.401f);
+            Assert.Equal(1f, AutumnEffectsProfile.GetWeight(autumn));
+            Assert.InRange(AutumnEffectsProfile.GetWeight(leaving), 0.249f, 0.251f);
+        }
+
+        [Fact]
+        public void WindRaisesLeafFallWithinBoundedBudget()
+        {
+            var autumn = new SeasonState(2d, SeasonKind.Autumn, SeasonKind.Winter,
+                0f, 0f, 8f, AutumnEffectsProfile.WetnessEquivalent);
+            var calm = AutumnEffectsProfile.GetLeafEmissionRate(autumn, 0f);
+            var breeze = AutumnEffectsProfile.GetLeafEmissionRate(autumn, 7f);
+            var storm = AutumnEffectsProfile.GetLeafEmissionRate(autumn, 30f);
+
+            Assert.Equal(7f, calm);
+            Assert.True(breeze > calm);
+            Assert.Equal(42f, storm);
+        }
+
+        [Fact]
+        public void GameWindLiftsGroundLeavesWithABoundedRate()
+        {
+            Assert.Equal(0f, AutumnEffectsProfile.GetGroundWindLiftRate(1f, 0f));
+            Assert.Equal(0f, AutumnEffectsProfile.GetGroundWindLiftRate(1f,
+                AutumnEffectsProfile.GroundWindLiftStartMetresPerSecond));
+            var breeze = AutumnEffectsProfile.GetGroundWindLiftRate(1f, 7f);
+            Assert.InRange(breeze, 8f, 11f);
+            Assert.Equal(AutumnEffectsProfile.GroundWindLiftMaximumLeavesPerSecond,
+                AutumnEffectsProfile.GetGroundWindLiftRate(1f, 30f));
+            Assert.Equal(0f, AutumnEffectsProfile.GetGroundWindLiftRate(0f, 30f));
+            Assert.Equal(0f, AutumnEffectsProfile.GetGroundWindLiftRate(1f, float.NaN));
+        }
+
+        [Fact]
+        public void StrongWindAddsOnlyBoundedHiddenLeafIngress()
+        {
+            var autumn = new SeasonState(2d, SeasonKind.Autumn, SeasonKind.Winter,
+                0f, 0f, 8f, AutumnEffectsProfile.WetnessEquivalent);
+            var winter = new SeasonState(3d, SeasonKind.Winter, SeasonKind.Spring,
+                0f, 1f, -15f, 0.4f);
+
+            Assert.Equal(0f, AutumnEffectsProfile.GetHiddenLeafIngressRate(autumn, 8f));
+            Assert.InRange(AutumnEffectsProfile.GetHiddenLeafIngressRate(autumn, 10f),
+                10f, 20f);
+            Assert.Equal(AutumnEffectsProfile.HiddenLeafIngressMaximumLeavesPerSecond,
+                AutumnEffectsProfile.GetHiddenLeafIngressRate(autumn, 13.5f));
+            Assert.Equal(AutumnEffectsProfile.HiddenLeafIngressMaximumLeavesPerSecond,
+                AutumnEffectsProfile.GetHiddenLeafIngressRate(autumn, 30f));
+            Assert.Equal(0f, AutumnEffectsProfile.GetHiddenLeafIngressRate(winter, 30f));
+            Assert.Equal(0f, AutumnEffectsProfile.GetHiddenLeafIngressRate(autumn,
+                float.NaN));
+            Assert.Equal(0f, AutumnEffectsProfile.GetHiddenLeafIngressRate(autumn,
+                float.PositiveInfinity));
+        }
+
+        [Fact]
+        public void HiddenLeafSourceKeepsTheWholeCrownPastASideOfTheViewport()
+        {
+            Assert.False(AutumnEffectsProfile.IsHiddenLeafIngressSource(
+                0.5f, 0.5f, 60f, 0.08f, 80f, 0.8f, 12f));
+            Assert.False(AutumnEffectsProfile.IsHiddenLeafIngressSource(
+                -0.1f, 0.5f, 60f, 0.08f, 80f, 0.8f, 12f));
+            Assert.True(AutumnEffectsProfile.IsHiddenLeafIngressSource(
+                -0.13f, 0.5f, 60f, 0.08f, 80f, 0.8f, 12f));
+            Assert.True(AutumnEffectsProfile.IsHiddenLeafIngressSource(
+                1.13f, 0.5f, 60f, 0.08f, 80f, 0.8f, 12f));
+            Assert.False(AutumnEffectsProfile.IsHiddenLeafIngressSource(
+                -0.13f, 0.5f, -1f, 0.08f, 80f, 0.8f, 12f));
+            Assert.False(AutumnEffectsProfile.IsHiddenLeafIngressSource(
+                -0.13f, 0.5f, 60f, 0.08f, 80f, -0.2f, 12f));
+            Assert.False(AutumnEffectsProfile.IsHiddenLeafIngressSource(
+                -0.13f, 0.5f, 60f, 0.08f, 80f, 0.8f, 70f));
+            Assert.False(AutumnEffectsProfile.IsHiddenLeafIngressSource(
+                -0.13f, 0.5f, 60f, 0.08f, 34f, 0.8f, 12f));
+            Assert.False(AutumnEffectsProfile.IsHiddenLeafIngressSource(
+                -0.13f, 0.5f, 60f, 0.08f, 116f, 0.8f, 12f));
+        }
+
+        [Fact]
+        public void PassingTrainLiftStartsAtLowSpeedAndScalesSmoothly()
+        {
+            var autumn = new SeasonState(2d, SeasonKind.Autumn, SeasonKind.Winter,
+                0f, 0f, 8f, AutumnEffectsProfile.WetnessEquivalent);
+
+            Assert.Equal(0f, AutumnEffectsProfile.GetTrainLiftIntensity(autumn, 8f));
+            Assert.InRange(AutumnEffectsProfile.GetTrainLiftIntensity(autumn, 31.5f),
+                0.49f, 0.51f);
+            Assert.Equal(1f, AutumnEffectsProfile.GetTrainLiftIntensity(autumn, 80f));
+        }
+
+        [Fact]
+        public void TrainWakeCoversCarBodyAndFadesBehindEachCar()
+        {
+            var besideBody = AutumnEffectsProfile.GetTrainWakeStrength(1f, 55f,
+                0f, 1f, 7f, 1.6f);
+            var closeBehind = AutumnEffectsProfile.GetTrainWakeStrength(1f, 55f,
+                -10f, 1f, 7f, 1.6f);
+            var farBehind = AutumnEffectsProfile.GetTrainWakeStrength(1f, 55f,
+                -19f, 1f, 7f, 1.6f);
+
+            Assert.Equal(1f, besideBody);
+            Assert.True(closeBehind < besideBody);
+            Assert.True(farBehind < closeBehind);
+            Assert.Equal(0f, AutumnEffectsProfile.GetTrainWakeStrength(1f, 55f,
+                -22f, 2f, 7f, 1.6f));
+        }
+
+        [Fact]
+        public void TrainWakeRejectsSlowCarsAndLeavesOutsideTheAirVolume()
+        {
+            Assert.Equal(0f, AutumnEffectsProfile.GetTrainWakeStrength(1f, 8f,
+                0f, 0f, 7f, 1.6f));
+            Assert.Equal(0f, AutumnEffectsProfile.GetTrainWakeStrength(1f, 55f,
+                0f, 9f, 7f, 1.6f));
+            Assert.Equal(0f, AutumnEffectsProfile.GetTrainWakeStrength(0f, 55f,
+                0f, 0f, 7f, 1.6f));
+        }
+
+        [Fact]
         public void AutomaticCycleUsesGameDaysAndWraps()
         {
             var settings = new SeasonSettingsSnapshot(true, 5f, 1f, SeasonKind.Winter, true, 0.5f);
             var cycle = new SeasonCycle(settings, 3d);
             cycle.AdvanceGameDays(5d);
             Assert.Equal(SeasonKind.Spring, cycle.GetState().Current);
+        }
+
+        [Fact]
+        public void ClimateUsesExpandedSummerAndWinterExtremes()
+        {
+            var cycle = new SeasonCycle(new SeasonSettingsSnapshot(true, 14f, 3f,
+                SeasonKind.Spring, true, 0.45f), 0d);
+
+            cycle.SetSeason(SeasonKind.Summer);
+            Assert.Equal(30f, cycle.GetState().TemperatureCelsius);
+
+            cycle.SetSeason(SeasonKind.Winter);
+            Assert.Equal(-30f, cycle.GetState().TemperatureCelsius);
+        }
+
+        [Fact]
+        public void AutumnToWinterTemperatureSlidesDuringTransition()
+        {
+            var cycle = new SeasonCycle(new SeasonSettingsSnapshot(true, 14f, 3f,
+                SeasonKind.Autumn, true, 0.45f), 2d + 12d / 14d);
+
+            var state = cycle.GetState();
+            Assert.Equal(SeasonKind.Autumn, state.Current);
+            Assert.Equal(SeasonKind.Winter, state.Next);
+            Assert.InRange(state.TemperatureCelsius, -30f, 8f);
+            Assert.True(state.TemperatureCelsius < 8f);
         }
 
         [Fact]
@@ -81,6 +251,9 @@ namespace DVSeasons.Tests
                 SeasonKind.Winter, 0.75f, 0.42f, -3.5f, 0.18f), 21f, 4f,
                 0.82f, -7.25f, 3.5f, 0.35f, 3, false);
             original.Sequence = 57;
+            original.SeasonSelectionRevision = 12;
+            original.HasSurfaceSnowCoverage = true;
+            original.SurfaceSnowCoverage = .37f;
 
             SeasonNetworkState restored;
             using (var stream = new MemoryStream())
@@ -95,6 +268,9 @@ namespace DVSeasons.Tests
             Assert.True(restored.IsValid());
             Assert.Equal(original.Protocol, restored.Protocol);
             Assert.Equal(original.Sequence, restored.Sequence);
+            Assert.Equal(12u, restored.SeasonSelectionRevision);
+            Assert.True(restored.HasSurfaceSnowCoverage);
+            Assert.Equal(.37f, restored.SurfaceSnowCoverage);
             Assert.Equal(original.Phase, restored.Phase);
             Assert.Equal(original.Current, restored.Current);
             Assert.Equal(original.Next, restored.Next);
@@ -110,6 +286,17 @@ namespace DVSeasons.Tests
             Assert.Equal(-7.25f, restored.WindVelocityX);
             Assert.Equal(3.5f, restored.WindVelocityZ);
             Assert.Equal(0.35f, restored.SnowLightFactor);
+        }
+
+        [Fact]
+        public void OldNetworkProtocolIsRejectedWithoutReadingPastItsPayload()
+        {
+            using (var stream = new MemoryStream())
+            {
+                new BinaryWriter(stream).Write(7);
+                stream.Position = 0;
+                Assert.False(SeasonNetworkState.ReadFrom(new BinaryReader(stream)).IsValid());
+            }
         }
 
         [Fact]

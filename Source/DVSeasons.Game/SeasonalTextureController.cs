@@ -81,7 +81,10 @@ namespace DVSeasons.Mod
                 if (failed || pixelBudget <= 0) return 0;
                 try
                 {
-                    if (!IsReady) Initialize();
+                    // Initialization can be deferred while Unity streams the
+                    // source mip. Keep this set in the queue until the readiness
+                    // guard returns true; never blend or cache a partial readback.
+                    if (!IsReady && !Initialize()) return 0;
                     if (!IsReady || (styleKey == lastStyleKey && pendingStyleKey == int.MinValue)) return 0;
                     if (pendingStyleKey == int.MinValue)
                     {
@@ -245,6 +248,7 @@ namespace DVSeasons.Mod
 
             public void Dispose()
             {
+                StreamingTextureReadiness.Cancel(source);
                 DisposeOutput();
                 basePixels = null;
                 profiles = null;
@@ -255,9 +259,9 @@ namespace DVSeasons.Mod
                 ClearPendingUpdate();
             }
 
-            private void Initialize()
+            private bool Initialize()
             {
-                if (source == null) return;
+                if (source == null) return false;
                 // Keep ballast detailed enough for a cab view, but cap its CPU blend
                 // buffer at 512px. The fixed source retains small stones and the work
                 // is completed incrementally, avoiding a million-pixel transition
@@ -295,7 +299,21 @@ namespace DVSeasons.Mod
                         height = frameResolution;
                     }
                 }
-                basePixels = ReadScaledPixels(source, width, height);
+                // A streamed source can report valid dimensions before its requested
+                // mip is resident. Keep the set pending instead of reading a stale
+                // low-resolution mip and permanently caching the wrong season.
+                StreamingTextureReadiness.ReadLease sourceLease;
+                if (!StreamingTextureReadiness.TryAcquire(source, width, height,
+                    out sourceLease)) return false;
+                try
+                {
+                    basePixels = ReadScaledPixels(source, width, height);
+                }
+                finally
+                {
+                    if (sourceLease != null) sourceLease.Dispose();
+                }
+                if (basePixels == null || basePixels.Length != width * height) return false;
                 winterTrackProfiles = LoadWinterTrackProfiles(width, height);
 
                 profiles = new Color32[4][];
@@ -330,6 +348,7 @@ namespace DVSeasons.Mod
                     hideFlags = HideFlags.HideAndDontSave
                 };
                 UploadOutput(basePixels, false);
+                return true;
             }
 
             private void PrepareDenseSurfaceSnow(int width, int height)
@@ -513,6 +532,18 @@ namespace DVSeasons.Mod
                 var adjusted = season == SeasonKind.Autumn && category != TextureCategory.Sleeper
                     ? EnhanceAutumnProfile(pixels)
                     : pixels;
+                if (season == SeasonKind.Spring &&
+                    (category == TextureCategory.Foliage || category == TextureCategory.Billboard))
+                {
+                    adjusted = new Color32[basePixels.Length];
+                    for (int i=0;i<adjusted.Length;i++)
+                    {
+                        var p=basePixels[i];float r=p.r/255f,g=p.g/255f,b=p.b/255f;
+                        SpringAppearance.Recolor(ref r,ref g,ref b,evergreen);
+                        adjusted[i]=new Color32((byte)Mathf.RoundToInt(r*255),
+                            (byte)Mathf.RoundToInt(g*255),(byte)Mathf.RoundToInt(b*255),p.a);
+                    }
+                }
                 if (category == TextureCategory.Billboard && season == SeasonKind.Winter && !evergreen)
                 {
                     Color32[] bareTreeAtlas;
@@ -1037,7 +1068,9 @@ namespace DVSeasons.Mod
                 category = TextureCategory.Billboard;
                 return true;
             }
-            if (ContainsAny(value, "bark", "trunk", "branch", "wood"))
+            if (ContainsAny(value, "bark", "trunk", "branch", "wood", "stump", "stumps",
+                "deadwood", "dead wood", "dead_log", "dead log", "root", "snag",
+                "fallen_log", "fallen log", "log_", "_log", " logs"))
             {
                 category = TextureCategory.Bark;
                 return true;

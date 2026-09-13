@@ -13,13 +13,14 @@ Shader "Hidden/DVSeasons/SnowVehicle"
     float _DVPSVehicleIndex, _DVPSVehicleCutoff;
     sampler2D _DVPSVehicleAlbedo;
     UNITY_DECLARE_DEPTH_TEXTURE(_CameraDepthTexture);
-    struct v2f { float4 pos:SV_POSITION; float3 local:TEXCOORD0; float2 uv:TEXCOORD1; float4 screen:TEXCOORD2; float eye:TEXCOORD3; };
+    struct v2f { float4 pos:SV_POSITION; float3 local:TEXCOORD0; float2 uv:TEXCOORD1; float4 screen:TEXCOORD2; float eye:TEXCOORD3; float3 normal:TEXCOORD4; };
     v2f vertexData(appdata_base v)
     {
         v2f o;
         o.pos=UnityObjectToClipPos(v.vertex);
         o.screen=ComputeScreenPos(o.pos); o.eye=-UnityObjectToViewPos(v.vertex).z;
         o.local=mul(_DVPSVehicleWorldToLocal,mul(unity_ObjectToWorld,v.vertex)).xyz;
+        o.normal=UnityObjectToWorldNormal(v.normal);
         o.uv=v.texcoord.xy*_DVPSVehicleST.xy+_DVPSVehicleST.zw;
         return o;
     }
@@ -44,7 +45,15 @@ Shader "Hidden/DVSeasons/SnowVehicle"
         float visibleDepth=LinearEyeDepth(SAMPLE_DEPTH_TEXTURE_PROJ(_CameraDepthTexture,UNITY_PROJ_COORD(i.screen)));
         clip(max(0.015,i.eye*0.00005)-abs(visibleDepth-i.eye));
         if (_DVPSVehicleCutoff>0) clip(tex2D(_DVPSVehicleAlbedo,i.uv).a-_DVPSVehicleCutoff);
-        return float4(i.local,_DVPSVehicleIndex);
+        // Keep the body's unperturbed slope with its local coordinates. Deriving
+        // it later from camera depth and a normal-mapped GBuffer made roof bevels
+        // depend on paint detail, neighbouring pixels and viewing direction.
+        // A quarter of the fractional ID fits the existing half-float target;
+        // rounding still yields the exact car ID (1..32). Negative exclusions
+        // and rail markers retain their original representation.
+        float id=_DVPSVehicleIndex;
+        if(id>0.5) id+=saturate(normalize(i.normal).y)*0.25;
+        return float4(i.local,id);
     }
     float4 height(v2f i):SV_Target
     {

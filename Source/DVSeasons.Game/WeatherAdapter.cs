@@ -8,6 +8,7 @@ namespace DVSeasons.Mod
     internal sealed class WeatherAdapter : IDisposable
     {
         private readonly SeasonalClimateController climate = new SeasonalClimateController();
+        private readonly SeasonalWeatherIsolation isolation = new SeasonalWeatherIsolation();
 
         public void ApplySeasonalClimate(SeasonState state, bool daylight, bool weather)
         {
@@ -18,6 +19,7 @@ namespace DVSeasons.Mod
         private WeatherDriver driver;
         private float nextProbeTime;
         private readonly WetnessOverrideOwnership wetnessOwnership=new WetnessOverrideOwnership();
+        private readonly WeatherOverrideOwnership thunderOwnership = new WeatherOverrideOwnership();
         private int adhesionStatus=-1;
         private bool capturedPrecipitation;
         private bool appliedPrecipitation;
@@ -25,11 +27,20 @@ namespace DVSeasons.Mod
         private Vector2 originalRainRangeMax;
         private Vector2 lastAppliedRainRangeStart;
         private Vector2 lastAppliedRainRangeMax;
-        private bool capturedThunder;
-        private bool previousThunderWasOverridden;
-        private float previousThunderOverride;
 
         public bool IsReady { get { return driver != null; } }
+        public SeasonState WithAirTemperature(SeasonState state)
+        {
+            DateTime date;
+            if (state == null || driver == null || !TryGetGameDateTime(out date)) return state;
+            var snapshot = driver.CurrentChungusState.currentLow;
+            var clouds = Mathf.Clamp01(Mathf.Max(snapshot.OverallFogginess, snapshot.cloudCoverage * snapshot.cloudOpacity));
+            float temperature = AirTemperatureProfile.Evaluate(state, date.Ticks / (double)TimeSpan.TicksPerDay,
+                driver.TimeOfDayHours.CurrentValue, clouds, RainIntensity,
+                driver.WindSpeed.CurrentValue / 7f, driver.ThunderValue.CurrentValue);
+            return new SeasonState(state.Phase, state.Current, state.Next, state.Transition,
+                state.SnowAmount, temperature, state.WinterWetnessEquivalent);
+        }
         public float RainIntensity { get { return driver == null ? 0f : Mathf.Clamp01(driver.RainValue.CurrentValue); } }
         public float SnowLightFactor
         {
@@ -51,6 +62,48 @@ namespace DVSeasons.Mod
             if (driver != null || Time.realtimeSinceStartup < nextProbeTime) return;
             nextProbeTime = Time.realtimeSinceStartup + 2f;
             driver = UnityEngine.Object.FindObjectOfType<WeatherDriver>();
+            if (driver != null) isolation.Enable(this);
+        }
+
+        internal SeasonalWeatherIsolation.SuspendedValue SuspendWetness(WeatherDriver target)
+        {
+            if (target != driver || !wetnessOwnership.Owns(target.WetnessValue.IsOverridden,
+                target.WetnessValue.OverriddenValue)) return null;
+            return new SeasonalWeatherIsolation.SuspendedValue(target.WetnessValue);
+        }
+
+        internal SeasonalWeatherIsolation.SuspendedValue SuspendThunder(WeatherDriver target)
+        {
+            if (target != driver || !thunderOwnership.Owns(target.ThunderValue.IsOverridden,
+                target.ThunderValue.OverriddenValue)) return null;
+            return new SeasonalWeatherIsolation.SuspendedValue(target.ThunderValue);
+        }
+
+        public void ResetSeasonEffects()
+        {
+            TickProbe();
+            ReleaseWetnessOverride(); ReleaseThunderOverride(); ReleaseSeasonalPrecipitation();
+            if (driver == null) return;
+            // Season selection also cancels stale weather-editor overrides (and
+            // ones restored from an older save), before applying the new season.
+            driver.WetnessValue.ClearOverride();
+            driver.ThunderValue.ClearOverride();
+            float normalDay = DV.Globals.G.GameParams.DayLengthInMinutes;
+            var day = driver.DayLengthInMinutes;
+            Debug.Log("[DVSeasons] Season change: reset wetness/thunder; weather day " +
+                day.CurrentValue + " min (override=" + day.IsOverridden + ") -> " + normalDay + " min.");
+            day.ClearOverride();
+            day.RealValue = normalDay;
+        }
+
+        public void RefreshSeasonWeather()
+        {
+            if (driver == null) return;
+            // Reconstruct actual rain wetness using the new season, rather than
+            // preserving a winter value fed back by versions without isolation.
+            // Calling only the driver's calculation does not jump the clock or
+            // notify fauna/jobs/other time listeners.
+            HarmonyLib.AccessTools.Method(typeof(WeatherDriver), "OnTimeJump").Invoke(driver, null);
         }
 
         public bool TryGetGameDateTime(out DateTime dateTime)
@@ -77,13 +130,13 @@ namespace DVSeasons.Mod
             var wetness = driver.WetnessValue;
             if(!wetnessOwnership.Acquire(wetness.IsOverridden,wetness.OverriddenValue,respectExternalOverride))
             {
-                if(adhesionStatus!=1) Debug.Log("[DVSeasons] Winter adhesion is waiting for an external wetness override to end. Wetness="+wetness.CurrentValue);
+                if(adhesionStatus!=1) Debug.Log("[DVSeasons] Seasonal adhesion is waiting for an external wetness override to end. Wetness="+wetness.CurrentValue);
                 adhesionStatus=1;return;
             }
             float value=Mathf.Max(wetness.RealValue,state.WinterWetnessEquivalent);
             wetness.EngageOverride(value);
             wetnessOwnership.Applied(value);
-            if(adhesionStatus!=2) Debug.Log("[DVSeasons] Winter adhesion active. Native wetness="+wetness.CurrentValue);
+            if(adhesionStatus!=2) Debug.Log("[DVSeasons] Seasonal adhesion active. Native wetness="+wetness.CurrentValue);
             adhesionStatus=2;
         }
 
@@ -130,13 +183,10 @@ namespace DVSeasons.Mod
                 return;
             }
 
-            if (!capturedThunder)
-            {
-                capturedThunder = true;
-                previousThunderWasOverridden = driver.ThunderValue.IsOverridden;
-                previousThunderOverride = driver.ThunderValue.OverriddenValue;
-            }
-            driver.ThunderValue.EngageOverride(0f);
+            var thunder = driver.ThunderValue;
+            thunderOwnership.Acquire(thunder.IsOverridden, thunder.OverriddenValue, false);
+            thunder.EngageOverride(0f);
+            thunderOwnership.Applied(0f);
         }
 
         public void ReleaseWetnessOverride()
@@ -167,23 +217,15 @@ namespace DVSeasons.Mod
 
         public void ReleaseThunderOverride()
         {
-            if (!capturedThunder) return;
-            if (driver == null)
+            bool overridden;
+            float value;
+            if (driver != null && thunderOwnership.Release(driver.ThunderValue.IsOverridden,
+                driver.ThunderValue.OverriddenValue, out overridden, out value))
             {
-                capturedThunder = false;
-                return;
+                if (overridden) driver.ThunderValue.EngageOverride(value);
+                else driver.ThunderValue.ClearOverride();
             }
-            if (!driver.ThunderValue.IsOverridden ||
-                Mathf.Abs(driver.ThunderValue.OverriddenValue) > 0.0001f)
-            {
-                capturedThunder = false;
-                return;
-            }
-            if (previousThunderWasOverridden)
-                driver.ThunderValue.EngageOverride(previousThunderOverride);
-            else
-                driver.ThunderValue.ClearOverride();
-            capturedThunder = false;
+            thunderOwnership.Reset();
         }
 
         private void CapturePrecipitationSettings()
@@ -213,6 +255,7 @@ namespace DVSeasons.Mod
             ReleaseWetnessOverride();
             ReleaseSeasonalPrecipitation();
             ReleaseThunderOverride();
+            isolation.Dispose();
             driver = null;
             nextProbeTime = 0f;
         }

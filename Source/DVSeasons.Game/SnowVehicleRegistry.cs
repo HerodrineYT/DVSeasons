@@ -76,6 +76,68 @@ namespace DVSeasons.Mod
         private readonly Vector4[] snowAreas = new Vector4[Capacity];
         private readonly float[] snowRemaining = new float[Capacity];
         public Func<Component,float> SnowRemaining;
+        public Func<Component,string> StableVehicleId;
+        private readonly Dictionary<string,VehicleSnowMask> savedMasks = new Dictionary<string,VehicleSnowMask>(StringComparer.OrdinalIgnoreCase);
+        private int snapshotGeneration;
+        private readonly List<AsyncGPUReadbackRequest> pendingSnapshots = new List<AsyncGPUReadbackRequest>();
+        public void SaveMasks(List<VehicleSnowMask> destination)
+        {
+            // Readbacks are requested when a mask changes, not every frame.
+            // Complete pending copies before serializing the game's save snapshot.
+            foreach(var request in pendingSnapshots) if(!request.done) request.WaitForCompletion();
+            pendingSnapshots.Clear();
+            foreach(var mask in savedMasks.Values) { mask.Pack(); destination.Add(mask); }
+        }
+        public void RestoreMasks(List<VehicleSnowMask> records)
+        {
+            savedMasks.Clear(); snapshotGeneration++;
+            if(records==null) return;
+            foreach(var record in records)
+                if(record!=null && !string.IsNullOrEmpty(record.Id) && record.Id.Length<=80 &&
+                    !string.IsNullOrEmpty(record.Packed) && record.Packed.Length<=200000 &&
+                    Math.Abs(record.Area.x)<1000 && Math.Abs(record.Area.y)<1000 &&
+                    record.Area.z>0 && record.Area.z<1000 && record.Area.w>0 && record.Area.w<1000)
+                    savedMasks[record.Id]=record;
+        }
+        private bool RestoreMask(Vehicle vehicle,float snowClock)
+        {
+            string id=StableVehicleId?.Invoke(vehicle.Source);
+            VehicleSnowMask state;
+            if(string.IsNullOrEmpty(id) || !savedMasks.TryGetValue(id,out state)) return false;
+            Texture2D texture=null;
+            try
+            {
+                var bytes=state.Unpack(); if(bytes==null) return false;
+                texture=new Texture2D(256,256,TextureFormat.RHalf,false,true);
+                texture.LoadRawTextureData(bytes); texture.Apply(false,false);
+                Graphics.CopyTexture(texture,0,0,snow,vehicle.Slot,0);
+                vehicle.SnowArea=state.Area; snowAreas[vehicle.Slot]=state.Area;
+                vehicle.SnowReady=true;vehicle.LastSnowClock=snowClock;
+                vehicle.SnowShapeDirty=state.Area!=vehicle.Area;
+                return true;
+            }
+            catch(Exception e) { savedMasks.Remove(id); Debug.LogWarning("[DVSeasons] Invalid vehicle snow mask: "+e.Message); return false; }
+            finally { if(texture!=null) UnityEngine.Object.Destroy(texture); }
+        }
+        private void SnapshotMask(Vehicle vehicle)
+        {
+            string id=StableVehicleId?.Invoke(vehicle.Source);
+            if(string.IsNullOrEmpty(id) || !SystemInfo.supportsAsyncGPUReadback) return;
+            int generation=snapshotGeneration; var area=vehicle.SnowArea;
+            for(int i=pendingSnapshots.Count-1;i>=0;i--) if(pendingSnapshots[i].done) pendingSnapshots.RemoveAt(i);
+            pendingSnapshots.Add(AsyncGPUReadback.Request(snow,0,0,256,0,256,vehicle.Slot,1,request=>
+            {
+                if(generation!=snapshotGeneration || request.hasError) return;
+                var data = request.GetData<byte>();
+                VehicleSnowMask state;
+                if (!savedMasks.TryGetValue(id, out state))
+                    savedMasks[id] = state = new VehicleSnowMask { Id = id };
+                if (state.Raw == null || state.Raw.Length != data.Length) state.Raw = new byte[data.Length];
+                data.CopyTo(state.Raw);
+                state.Area = area;
+                state.Packed = null; // The previous compressed save no longer describes this mask.
+            }));
+        }
         public Func<Renderer,int,bool> HasNativeSnowTexture;
         private CommandBuffer capture;
         private Material material;
@@ -85,6 +147,8 @@ namespace DVSeasons.Mod
         private Mesh snowQuad;
         private int nextSnowVehicle;
         private float nextScan;
+        private Vector3 lastCameraPosition;
+        private bool cameraPositionKnown;
         private Type trainType;
         public Func<IEnumerable<Component>> DiscoverVehicles;
         private static readonly int DataId = Shader.PropertyToID("_DVPSVehicleData");
@@ -138,9 +202,23 @@ namespace DVSeasons.Mod
 
         public void Update(Camera camera)
         {
+            // A teleport/fast relocation invalidates the nearest-car ordering;
+            // request an immediate discovery instead of waiting for the normal
+            // half-second polling interval.
+            if (camera != null)
+            {
+                if (!cameraPositionKnown || (camera.transform.position-lastCameraPosition).sqrMagnitude > 64f)
+                    nextScan = 0f;
+                lastCameraPosition = camera.transform.position;
+                cameraPositionKnown = true;
+            }
             if (Time.realtimeSinceStartup >= nextScan)
             {
-                nextScan = Time.realtimeSinceStartup+5f;
+                // Cars can be streamed in or become visible immediately after
+                // a fast relocation.  A five-second discovery interval left
+                // their snow overlay blank even when the same cars were already
+                // rendered with snow before the move.
+                nextScan = Time.realtimeSinceStartup+0.5f;
                 if (trainType == null)
                     foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
                     { trainType = assembly.GetType("TrainCar",false); if (trainType != null) break; }
@@ -375,7 +453,7 @@ namespace DVSeasons.Mod
         }
 
         public void ResetSnow()
-        { foreach(var v in vehicles) v.SnowReady=false; }
+        { foreach(var v in vehicles) v.SnowReady=false; savedMasks.Clear(); snapshotGeneration++; }
 
         public void Accumulate(RenderTexture nearHeight,Vector4 nearArea,float nearOffset,
             RenderTexture farHeight,Vector4 farArea,float farOffset,float snowClock)
@@ -386,6 +464,7 @@ namespace DVSeasons.Mod
             {
                 nextSnowVehicle%=vehicles.Count;
                 var v=vehicles[nextSnowVehicle++];
+                if(v.Root!=null && v.Ready && !v.SnowReady && RestoreMask(v,snowClock)) break;
                 if(v.Root==null || !v.Ready || (v.SnowReady && !v.SnowShapeDirty && snowClock-v.LastSnowClock<1f/180f)) continue;
                 capture.Clear();capture.SetRenderTarget(snowSlice);
                 capture.SetGlobalTexture("_DVPSVehicleHeights",heights);
@@ -402,6 +481,7 @@ namespace DVSeasons.Mod
                 Graphics.CopyTexture(snowSlice,0,0,snow,v.Slot,0);
                 v.SnowReady=true;v.SnowShapeDirty=false;v.LastSnowClock=snowClock;
                 v.SnowArea=v.Area;snowAreas[v.Slot]=v.SnowArea;
+                SnapshotMask(v);
                 break;
             }
         }
@@ -494,12 +574,13 @@ namespace DVSeasons.Mod
         }
         public void Dispose()
         {
+            snapshotGeneration++; savedMasks.Clear(); pendingSnapshots.Clear();
             RestoreAfterStaticCapture();
             if(capture != null) { capture.Dispose(); capture=null; }
             foreach(var v in vehicles) Unsubscribe(v);
             foreach(var resource in new UnityEngine.Object[]{material,heights,heightSlice,snow,snowSlice,snowQuad})
                 if (resource != null) { if(Application.isPlaying) UnityEngine.Object.Destroy(resource); else UnityEngine.Object.DestroyImmediate(resource); }
-            material=null; heights=heightSlice=null; vehicles.Clear(); byId.Clear(); staticVehicles.Clear();Array.Clear(usedSlots,0,usedSlots.Length); nextScan=0; Revision++;
+            material=null; heights=heightSlice=null; vehicles.Clear(); byId.Clear(); staticVehicles.Clear();Array.Clear(usedSlots,0,usedSlots.Length); nextScan=0; cameraPositionKnown=false; lastCameraPosition=Vector3.zero; Revision++;
             snow=snowSlice=null;snowQuad=null;nextSnowVehicle=0;
         }
     }

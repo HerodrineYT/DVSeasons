@@ -1,6 +1,5 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.IO;
 using DVSeasons.Core;
 using UnityEngine;
 
@@ -19,6 +18,7 @@ namespace DVSeasons.Mod
             public float OriginalTreeDistance;
             public float OriginalTreeBillboardDistance;
             public int OriginalTreeMaximumFullLodCount;
+            public TreePrototype[] TreePrototypes;
         }
 
         private sealed class RainRecord
@@ -38,8 +38,13 @@ namespace DVSeasons.Mod
         private readonly RailSnowGameSource railSnowSource = new RailSnowGameSource();
         private readonly LocomotiveSnowHeatController locomotiveHeat = new LocomotiveSnowHeatController();
         private readonly TenderCoalSnowController tenderCoal;
-        private readonly TrainSnowTrailController trainSnowTrail = new TrainSnowTrailController();
+        private readonly TrainSnowTrailController trainSnowTrail;
+        private readonly AutumnLeafGroundController autumnLeaves;
+        private readonly SpringLifeController springLife;
         private readonly SnowFootstepAudioController snowFootsteps;
+        private readonly WinterWindowController winterWindows;
+        private readonly SnowGlareController snowGlare;
+        private float lastWindowParticleCheck;
         private DV.TerrainSystem.TerrainGrid snowTerrainGrid;
         private readonly SeasonAssetBundleRepository texturePack;
         private readonly string modPath;
@@ -56,14 +61,18 @@ namespace DVSeasons.Mod
         private bool cameraInsideCab;
         private bool startupConfigured;
         private int startupStage;
-        private float startupNotBefore;
         private bool dynamicSnowEnabled;
 
         public SeasonVisualController(string modPath)
         {
             this.modPath = modPath ?? string.Empty;
             snowFootsteps = new SnowFootstepAudioController(this.modPath);
+            trainSnowTrail = new TrainSnowTrailController(this.modPath);
             texturePack = new SeasonAssetBundleRepository(modPath);
+            autumnLeaves = new AutumnLeafGroundController(texturePack);
+            springLife = new SpringLifeController(this.modPath);
+            winterWindows = new WinterWindowController(texturePack);
+            snowGlare = new SnowGlareController(texturePack);
             tenderCoal=new TenderCoalSnowController(texturePack);
             seasonalTextures = new SeasonalTextureController(texturePack);
             microSplatTerrain = new MicroSplatSeasonalTerrainController(texturePack);
@@ -72,6 +81,7 @@ namespace DVSeasons.Mod
             proceduralSurfaceSnow = new ProceduralSnowController(texturePack);
             proceduralSurfaceSnow.SetVehicleDiscovery(() => RailSnowGameSource.GetCars());
             proceduralSurfaceSnow.SetVehicleSnowRemaining(locomotiveHeat.Remaining);
+            proceduralSurfaceSnow.SetVehicleSaveIdentity(source => (source as TrainCar)?.CarGUID);
             snowFootsteps.SetVehicleSnowRemaining(locomotiveHeat.RemainingAt);
             proceduralSurfaceSnow.SetNativeVehicleSnow(tenderCoal.HasSnowTexture);
             proceduralSurfaceSnow.BeforeSnowRender = () =>
@@ -81,26 +91,66 @@ namespace DVSeasons.Mod
             };
         }
 
-        public void BeginSession(bool multiplayerSession)
+        public void BeginSession()
         {
             startupConfigured = true;
             startupStage = 0;
-            startupNotBefore = Time.realtimeSinceStartup + (multiplayerSession ? 4f : 0.75f);
-            Debug.Log("[DVSeasons] Seasonal visuals deferred for " +
-                (multiplayerSession ? "4.00" : "0.75") +
-                " s while the world finishes initialization.");
+            Debug.Log("[DVSeasons] Seasonal visuals staged after world initialization; " +
+                "streamed textures are checked individually before every readback.");
         }
+
+        // Keep the old call shape for integrations compiled against 0.3.1. The
+        // session type no longer affects readiness; each texture reports its own
+        // streaming state through StreamingTextureReadiness.
+        public void BeginSession(bool multiplayerSession)
+        {
+            BeginSession();
+        }
+
+        public void RestoreSnow(SaveGameData data)
+        {
+            string json=data.GetString("DVSeasons.SnowState");
+            if(string.IsNullOrEmpty(json)) return;
+            try
+            {
+                var state=SnowWorldSave.Decode(json);
+                if(state==null || state.Version!=1 || !SnowWorldSave.Unit(state.Coverage)) return;
+                proceduralSurfaceSnow.RestoreSnow(state);
+                locomotiveHeat.Restore(state.Cars);
+                winterWindows.Restore(state.Cabs);
+                winterWindows.RestoreMasks(state.WindowMasks);
+            }
+            catch(Exception e) { Debug.LogWarning("[DVSeasons] Snow save could not be restored: "+e.Message); }
+        }
+        public void SaveSnow(SaveGameData data)
+        {
+            var state=new SnowWorldSave();
+            proceduralSurfaceSnow.SaveSnow(state);
+            locomotiveHeat.Save(state.Cars);
+            winterWindows.Save(state.Cabs);
+            winterWindows.SaveMasks(state.WindowMasks);
+            data.SetString("DVSeasons.SnowState",state.Encode());
+        }
+
+        public void OnSeasonSelected() { proceduralSurfaceSnow.ReseedSeasonCoverage(); }
+        public float? SurfaceSnowCoverage => proceduralSurfaceSnow.HasCoverage
+            ? (float?)proceduralSurfaceSnow.Coverage : null;
+        public void SetNetworkSnowCoverage(float? coverage) { proceduralSurfaceSnow.SetNetworkCoverage(coverage); }
 
         public void Apply(SeasonState state, float precipitationSnowAmount, float rainIntensity, Vector3 windVelocity,
             float snowLightFactor, SeasonModSettings settings)
         {
             if (state == null || settings == null) return;
+            if (!settings.InsectsEnabled) springLife.Dispose();
             SnowPerformance.Frame();
             SetSnowMode(settings.ProceduralSnowEnabled);
             snowFootsteps.SetCoverage(settings.GroundSnowEnabled
                 ? state.SnowAmount*settings.GroundSnowStrength*settings.TextureChangeStrength : 0f,
                 settings.GroundSnowEnabled);
             if (!PrepareStartup(state, settings)) return;
+            snowGlare.Apply(settings.SnowGlareReduction, snowLightFactor,
+                settings.GroundSnowEnabled ? (proceduralSurfaceSnow.IsActive ? proceduralSurfaceSnow.Coverage : state.SnowAmount) : 0f);
+            proceduralSurfaceSnow.GlareReduction = snowGlare.Strength;
             var grid=dynamicSnowEnabled ? DV.TerrainSystem.TerrainGrid.Instance : null;
             if(grid!=snowTerrainGrid)
             {
@@ -128,7 +178,14 @@ namespace DVSeasons.Mod
                 ? (proceduralSurfaceSnow.IsActive?proceduralSurfaceSnow.Coverage:state.SnowAmount*settings.GroundSnowStrength*settings.TextureChangeStrength):0f,
                 dynamicSnowEnabled ? (Func<Component,float>)locomotiveHeat.Remaining : null);
             ApplyRainCrossfade(settings.ReplaceRainWithSnow ? precipitationSnowAmount : 0f);
+            using(SnowPerformance.Measure("winter-windows"))
+                winterWindows.Apply(state, precipitationSnowAmount * rainIntensity, snowLightFactor, settings.WinterWindowsEnabled);
             using(SnowPerformance.Measure("particles")) ApplySnowfall(precipitationSnowAmount, rainIntensity, windVelocity, snowLightFactor, settings);
+            using(SnowPerformance.Measure("autumn-leaf-cover"))
+                autumnLeaves.Apply(state, windVelocity, settings.AutumnLeafLimit);
+            using(SnowPerformance.Measure("spring-pollinators"))
+                if (settings.InsectsEnabled)
+                    springLife.Apply(state, rainIntensity, snowLightFactor, windVelocity);
 
             // Reuse the saved/networked SnowAmount for water and puddles. This keeps
             // both ice systems in the exact same phase as terrain on reconnect and
@@ -161,9 +218,8 @@ namespace DVSeasons.Mod
 
         private bool PrepareStartup(SeasonState state, SeasonModSettings settings)
         {
-            if (!startupConfigured) BeginSession(false);
+            if (!startupConfigured) BeginSession();
             if (startupStage >= 4) return true;
-            if (Time.realtimeSinceStartup < startupNotBefore) return false;
             if (startupStage == 0)
             {
                 texturePack.BeginLoad();
@@ -203,6 +259,8 @@ namespace DVSeasons.Mod
         public void ResetForSession()
         {
             SnowPerformance.Reset();
+            snowGlare.Dispose();
+            StreamingTextureReadiness.Reset();
             seasonalTextures.Dispose();
             microSplatTerrain.Dispose();
             waterIce.ResetForSession();
@@ -211,6 +269,8 @@ namespace DVSeasons.Mod
             dynamicSnowEnabled = false;
             tenderCoal.Dispose();locomotiveHeat.Reset();
             trainSnowTrail.Dispose();
+            autumnLeaves.Dispose();
+            springLife.Dispose();
             snowFootsteps.SetCoverage(0f,false);
             if(snowTerrainGrid!=null) snowTerrainGrid.TerrainsMoved-=proceduralSurfaceSnow.InvalidateGeometry;
             snowTerrainGrid=null;
@@ -242,12 +302,13 @@ namespace DVSeasons.Mod
             nextTerrainScan = 0f;
             nextRainScan = 0f;
             nextSnowShelterCheck = 0f;
+            winterWindows.Dispose();
+            lastWindowParticleCheck = 0f;
             nextCabSnowClear = 0f;
             snowSheltered = false;
             cameraInsideCab = false;
             startupConfigured = false;
             startupStage = 0;
-            startupNotBefore = 0f;
             texturePack.ResetForSession();
         }
 
@@ -273,7 +334,10 @@ namespace DVSeasons.Mod
                     OriginalDetailObjectDistance = terrain.detailObjectDistance,
                     OriginalTreeDistance = terrain.treeDistance,
                     OriginalTreeBillboardDistance = terrain.treeBillboardDistance,
-                    OriginalTreeMaximumFullLodCount = terrain.treeMaximumFullLODCount
+                    OriginalTreeMaximumFullLodCount = terrain.treeMaximumFullLODCount,
+                    TreePrototypes = terrain.terrainData == null
+                        ? null
+                        : terrain.terrainData.treePrototypes
                 });
             }
         }
@@ -452,6 +516,7 @@ namespace DVSeasons.Mod
                     snowSystem.Stop(false, ParticleSystemStopBehavior.StopEmittingAndClear);
                 return;
             }
+            InterceptWindowSnow(camera, settings.WinterWindowsEnabled);
             PositionSnowEmitter(camera, windVelocity);
             var emission = snowSystem.emission;
             emission.rateOverTimeMultiplier = 1600f * intensity;
@@ -486,6 +551,7 @@ namespace DVSeasons.Mod
             if (cameraInsideCab && Time.realtimeSinceStartup >= nextCabSnowClear)
             {
                 nextCabSnowClear = Time.realtimeSinceStartup + 0.30f;
+                // Keep approaching flakes outside the cab so they can hit glass.
                 ClearSnowNearCamera(camera.transform.position, 4.5f);
             }
         }
@@ -518,6 +584,29 @@ namespace DVSeasons.Mod
             if (snowMaterial.HasProperty("_Color")) snowMaterial.SetColor("_Color", tint);
         }
 
+        private void InterceptWindowSnow(Camera camera, bool enabled)
+        {
+            float now = Time.time;
+            if (!enabled || snowSystem == null || now-lastWindowParticleCheck < .05f) return;
+            float dt = Mathf.Clamp(now-lastWindowParticleCheck, .01f, .1f);
+            lastWindowParticleCheck = now;
+            int count = snowSystem.particleCount;
+            if (count == 0) return;
+            if (snowParticleBuffer == null || snowParticleBuffer.Length < count)
+                snowParticleBuffer = new ParticleSystem.Particle[Mathf.NextPowerOfTwo(count)];
+            count = snowSystem.GetParticles(snowParticleBuffer);
+            bool changed = false;
+            for (int i=0;i<count;i++)
+            {
+                var p=snowParticleBuffer[i];
+                if ((p.position-camera.transform.position).sqrMagnitude > 225) continue;
+                var velocity=p.totalVelocity;
+                if (!winterWindows.Collide(p.position-velocity*dt,p.position,dt)) continue;
+                p.remainingLifetime=0;snowParticleBuffer[i]=p;changed=true;
+            }
+            if(changed) snowSystem.SetParticles(snowParticleBuffer,count);
+        }
+
         private void ClearSnowNearCamera(Vector3 cameraPosition, float radius)
         {
             var particleCount = snowSystem == null ? 0 : snowSystem.particleCount;
@@ -530,6 +619,7 @@ namespace DVSeasons.Mod
             for (var i = 0; i < count; i++)
             {
                 if ((snowParticleBuffer[i].position - cameraPosition).sqrMagnitude > radiusSquared) continue;
+                if (winterWindows.IsOutsideCab(cameraPosition, snowParticleBuffer[i].position)) continue;
                 snowParticleBuffer[i].remainingLifetime = 0f;
                 changed = true;
             }
@@ -546,7 +636,7 @@ namespace DVSeasons.Mod
         {
             RaycastHit hit;
             return Physics.Raycast(origin, Vector3.up, out hit, distance,
-                Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+                SeasonSurfaceLayers.Mask, QueryTriggerInteraction.Ignore);
         }
 
         private void EnsureSnowSystem()
@@ -561,7 +651,7 @@ namespace DVSeasons.Mod
             main.cullingMode = ParticleSystemCullingMode.AlwaysSimulate;
             main.startLifetime = new ParticleSystem.MinMaxCurve(4f, 6.5f);
             main.startSpeed = new ParticleSystem.MinMaxCurve(0f, 0.4f);
-            main.startSize = new ParticleSystem.MinMaxCurve(0.05f, 0.17f);
+            main.startSize = new ParticleSystem.MinMaxCurve(SnowflakeParticleTexture.MinimumSize, SnowflakeParticleTexture.MaximumSize);
             main.startColor = new ParticleSystem.MinMaxGradient(new Color(0.94f, 0.97f, 1f, 0.95f), Color.white);
             main.startRotation = new ParticleSystem.MinMaxCurve(0f, Mathf.PI * 2f);
             main.gravityModifier = 0.04f;
@@ -596,7 +686,7 @@ namespace DVSeasons.Mod
             if (shader != null)
             {
                 var usesAtlas = false;
-                snowTexture = LoadOrCreateSnowTexture(out usesAtlas);
+                snowTexture = SnowflakeParticleTexture.LoadOrCreate(modPath, out usesAtlas);
                 snowMaterial = new Material(shader) { name = "DVSeasons Snow Material", mainTexture = snowTexture };
                 if (snowMaterial.HasProperty("_TintColor")) snowMaterial.SetColor("_TintColor", Color.white);
                 if (snowMaterial.HasProperty("_Color")) snowMaterial.SetColor("_Color", Color.white);
@@ -618,85 +708,6 @@ namespace DVSeasons.Mod
             renderer.cameraVelocityScale = 0.12f;
         }
 
-        private Texture2D LoadOrCreateSnowTexture(out bool usesAtlas)
-        {
-            var atlasPath = Path.Combine(modPath, "Textures", "snowflake_variations.png");
-            var path = File.Exists(atlasPath)
-                ? atlasPath
-                : Path.Combine(modPath, "Textures", "snowflake_realistic.png");
-            usesAtlas = string.Equals(path, atlasPath, StringComparison.OrdinalIgnoreCase);
-            if (File.Exists(path))
-            {
-                Texture2D loaded = null;
-                try
-                {
-                    loaded = new Texture2D(2, 2, TextureFormat.RGBA32, true)
-                    {
-                        name = "DVSeasons Irregular Snow Flake",
-                        filterMode = FilterMode.Trilinear,
-                        wrapMode = TextureWrapMode.Clamp,
-                        hideFlags = HideFlags.HideAndDontSave
-                    };
-                    if (ImageConversion.LoadImage(loaded, File.ReadAllBytes(path), true)) return loaded;
-                }
-                catch (Exception exception)
-                {
-                    Debug.LogWarning("[DVSeasons] Realistic snow particle texture could not be loaded: " +
-                        exception.Message);
-                }
-                if (loaded != null) UnityEngine.Object.Destroy(loaded);
-            }
-            usesAtlas = false;
-            return CreateFallbackSnowTexture();
-        }
-
-        private static Texture2D CreateFallbackSnowTexture()
-        {
-            const int size = 64;
-            var texture = new Texture2D(size, size, TextureFormat.RGBA32, false)
-            {
-                name = "DVSeasons Six-Arm Snowflake",
-                filterMode = FilterMode.Bilinear,
-                wrapMode = TextureWrapMode.Clamp,
-                hideFlags = HideFlags.HideAndDontSave
-            };
-            var pixels = new Color[size * size];
-            for (var y = 0; y < size; y++)
-            for (var x = 0; x < size; x++)
-            {
-                var dx = ((x + 0.5f) / size * 2f) - 1f;
-                var dy = ((y + 0.5f) / size * 2f) - 1f;
-                var radius = Mathf.Sqrt((dx * dx) + (dy * dy));
-                var alpha = Mathf.Clamp01((0.16f - radius) * 9f);
-                for (var arm = 0; arm < 3; arm++)
-                {
-                    var angle = arm * Mathf.PI / 3f;
-                    var along = Mathf.Abs((dx * Mathf.Cos(angle)) + (dy * Mathf.Sin(angle)));
-                    var across = Mathf.Abs((-dx * Mathf.Sin(angle)) + (dy * Mathf.Cos(angle)));
-                    var line = Mathf.Clamp01((0.052f - across) * 24f) *
-                        Mathf.Clamp01((0.94f - along) * 8f);
-                    alpha = Mathf.Max(alpha, line);
-
-                    for (var branch = 1; branch <= 2; branch++)
-                    {
-                        var branchOrigin = branch * 0.28f;
-                        var branchLength = 0.24f;
-                        var localAlong = along - branchOrigin;
-                        if (localAlong < 0f || localAlong > branchLength) continue;
-                        var branchAcross = Mathf.Abs(across - (localAlong * 0.58f));
-                        var branchLine = Mathf.Clamp01((0.045f - branchAcross) * 25f) *
-                            Mathf.Clamp01((branchLength - localAlong) * 10f);
-                        alpha = Mathf.Max(alpha, branchLine);
-                    }
-                }
-                alpha *= Mathf.Clamp01((1f - radius) * 5f);
-                pixels[(y * size) + x] = new Color(0.92f, 0.97f, 1f, alpha);
-            }
-            texture.SetPixels(pixels);
-            texture.Apply(false, true);
-            return texture;
-        }
-
         private static Color GetSeasonTint(SeasonState state, int steps)
         {
             return Color.Lerp(ProfileTint(state.Current), ProfileTint(state.Next),
@@ -713,7 +724,7 @@ namespace DVSeasons.Mod
         {
             switch (season)
             {
-                case SeasonKind.Spring: return new Color(0.78f, 1.08f, 0.76f);
+                case SeasonKind.Spring: return new Color(1.04f, 1.16f, 0.90f);
                 case SeasonKind.Autumn: return new Color(1.30f, 0.62f, 0.18f);
                 case SeasonKind.Winter: return new Color(1.2f, 1.25f, 1.32f);
                 default: return Color.white;

@@ -70,8 +70,8 @@ namespace DVSeasons.AssetBundleBuild
             for (var i = 0; i < shaderGuids.Length; i++)
                 shaderAssets.Add(AssetDatabase.GUIDToAssetPath(shaderGuids[i]));
             shaderAssets.Sort(StringComparer.Ordinal);
-            if (shaderAssets.Count != 5)
-                throw new InvalidOperationException("Expected 5 Shader assets, found " +
+            if (shaderAssets.Count != 9)
+                throw new InvalidOperationException("Expected 9 Shader assets, found " +
                     shaderAssets.Count);
             assets.AddRange(shaderAssets);
             assets.Add(AssetRoot + "/Generated/Terrain_spring.asset");
@@ -97,10 +97,14 @@ namespace DVSeasons.AssetBundleBuild
             {
                 VerifyBundleContents(verifiedBundle, assets);
                 IceShaderVerification.Verify(verifiedBundle);
+                WinterWindowVerification.Verify(verifiedBundle);
+                AutumnLeafVerification.Verify(verifiedBundle);
+                SpringTerrainVerification.Verify(verifiedBundle);
+                SnowGlareVerification.Verify(verifiedBundle);
             }
             finally { verifiedBundle.Unload(true); }
             Debug.Log("DVSeasons AssetBundle built: " + Path.Combine(output, BundleName) +
-                " (75 textures + 5 shaders + 3 MicroSplat terrain arrays; " +
+                " (75 textures + 9 shaders + 3 MicroSplat terrain arrays; " +
                 "96 duplicate source/override textures omitted)");
         }
 

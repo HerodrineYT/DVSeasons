@@ -2,10 +2,11 @@
   "Id": "DVSeasons",
   "DisplayName": "Dynamic Seasons",
   "Author": "Herodrine_",
-  "Version": "0.2.40",
+  "Version": "0.3.33",
   "AssemblyName": "DVSeasons.dll",
   "EntryMethod": "DVSeasons.Mod.Main.Load",
   "ManagerVersion": "0.32.4",
-  "LoadAfter": ["Multiplayer", "DoubleTrack", "PassengerJobs", "Mapify", "DVCustomCarLoader"],
+  "Requirements": ["DVLangHelper-1.2.1"],
+  "LoadAfter": ["DVLangHelper", "Multiplayer", "DoubleTrack", "PassengerJobs", "Mapify", "DVCustomCarLoader"],
   "MultiplayerCompatibility": "All"
 }

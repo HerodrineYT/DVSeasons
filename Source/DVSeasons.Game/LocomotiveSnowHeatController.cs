@@ -22,14 +22,33 @@ namespace DVSeasons.Mod
         }
         private readonly Dictionary<int,Entry> entries=new Dictionary<int,Entry>();
         private readonly List<int> expired=new List<int>();
+        private readonly Dictionary<string,float> saved = new Dictionary<string,float>(StringComparer.OrdinalIgnoreCase);
+        public void Restore(List<CarSnowState> records)
+        {
+            Reset(); if(records==null) return;
+            foreach(var record in records)
+                if(record!=null && !string.IsNullOrEmpty(record.Id) && record.Id.Length<=80 && SnowWorldSave.Unit(record.Melted))
+                    saved[record.Id]=record.Melted;
+        }
+        public void Save(List<CarSnowState> destination)
+        {
+            foreach(var entry in entries.Values)
+                if(entry.Car!=null && !string.IsNullOrEmpty(entry.Car.CarGUID)) saved[entry.Car.CarGUID]=entry.Melted;
+            foreach(var pair in saved) destination.Add(new CarSnowState {Id=pair.Key,Melted=pair.Value});
+        }
         public void Update(float snowfall,float coverage,float seconds)
         {
-            if(coverage<=0.001f) {entries.Clear();return;}
+            if(coverage<=0.001f) {entries.Clear();saved.Clear();return;}
             foreach(var car in RailSnowGameSource.GetCars())
             {
                 if(car==null || !car.IsLoco) continue;
                 Entry entry;int id=car.GetInstanceID();
-                if(!entries.TryGetValue(id,out entry)) {entry=new Entry {Car=car};entries.Add(id,entry);}
+                if(!entries.TryGetValue(id,out entry))
+                {
+                    float melted=0;
+                    if(!string.IsNullOrEmpty(car.CarGUID)) saved.TryGetValue(car.CarGUID,out melted);
+                    entry=new Entry {Car=car,Melted=melted};entries.Add(id,entry);
+                }
                 bool battery=car.carType==TrainCarType.LocoMicroshunter;
                 bool steam=car.carType==TrainCarType.LocoSteamHeavy || car.carType==TrainCarType.LocoS060;
                 var sim=car.SimController;var flow=sim!=null?sim.simFlow:null;
@@ -50,6 +69,7 @@ namespace DVSeasons.Mod
                 entry.StateKnown=true;
                 entry.Running=running;
                 entry.Melted=LocomotiveSnowHeat.Advance(entry.Melted,running,steam,battery,snowfall,seconds);
+                if(!string.IsNullOrEmpty(car.CarGUID)) saved[car.CarGUID]=entry.Melted;
                 Report(entry,steam,battery);
             }
             expired.Clear();foreach(var pair in entries) if(pair.Value.Car==null) expired.Add(pair.Key);
@@ -138,6 +158,6 @@ namespace DVSeasons.Mod
             Debug.Log("[DVSeasons] Snow heat " + Label(entry.Car) + " melted " +
                 Mathf.RoundToInt(entry.Melted*100f) + "% of dynamic cover.");
         }
-        public void Reset() {entries.Clear();expired.Clear();}
+        public void Reset() {entries.Clear();expired.Clear();saved.Clear();}
     }
 }

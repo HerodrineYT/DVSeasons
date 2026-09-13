@@ -12,6 +12,9 @@
     <Compile Include="..\DVSeasons.Game\SeasonRuntime.cs" Link="Runtime\SeasonRuntime.cs" />
     <Compile Include="..\DVSeasons.Game\SeasonModSettings.cs" Link="Runtime\SeasonModSettings.cs" />
     <Compile Include="..\DVSeasons.Game\SeasonSaveData.cs" Link="Runtime\SeasonSaveData.cs" />
+    <Compile Include="..\DVSeasons.MP\CabHeaterPackets.cs" Link="Runtime\CabHeaterPackets.cs" />
+    <Compile Include="..\DVSeasons.MP\SeasonPackets.cs" Link="Runtime\SeasonPackets.cs" />
+    <Compile Include="..\DVSeasons.MP\MultiplayerSeasonBridge.cs" Link="Runtime\MultiplayerSeasonBridge.cs" />
     <Compile Include="..\DVSeasons.Game\OfflineSeasonBridge.cs" Link="Runtime\OfflineSeasonBridge.cs" />
   </ItemGroup>
 </Project>

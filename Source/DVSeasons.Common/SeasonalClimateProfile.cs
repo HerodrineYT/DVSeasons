@@ -39,7 +39,7 @@ namespace DVSeasons.Core
         {
             switch (season)
             {
-                case SeasonKind.Spring: return cloud ? 0.04f : 0.03f;
+                case SeasonKind.Spring: return cloud ? 0.10f : 0.08f;
                 case SeasonKind.Summer: return 0f;
                 case SeasonKind.Autumn: return cloud ? 0.17f : 0.18f;
                 case SeasonKind.Winter: return cloud ? 0.12f : 0.08f;

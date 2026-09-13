@@ -36,4 +36,13 @@ public sealed class WetnessOverrideOwnershipTests
         bool overridden;float value;
         Assert.True(state.Release(true,0.5f,out overridden,out value));Assert.True(overridden);Assert.Equal(0.2f,value);
     }
+    [Fact] public void PriorityEffectRestoresOverrideThatReplacedItsAppliedValue()
+    {
+        var state=new WeatherOverrideOwnership();
+        Assert.True(state.Acquire(false,0f,false));state.Applied(0f);
+        Assert.True(state.Acquire(true,0.75f,false));state.Applied(0f);
+        bool overridden;float value;
+        Assert.True(state.Release(true,0f,out overridden,out value));
+        Assert.True(overridden);Assert.Equal(0.75f,value);
+    }
 }

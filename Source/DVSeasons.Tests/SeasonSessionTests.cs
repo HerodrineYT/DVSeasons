@@ -127,8 +127,14 @@ namespace DVSeasons.Tests
             {
                 session.Enter(winter);
                 Assert.Equal(3.8d, session.Runtime.CurrentState.Phase);
+                Assert.Same(winter,SeasonVisualController.SnowRestoredFrom);
+                session.Manager.Save();
+                Assert.Same(winter,SeasonVisualController.SnowWrittenTo);
                 UnloadWatcher.RequestUnload();
                 session.Enter(summer);
+                Assert.Same(summer,SeasonVisualController.SnowRestoredFrom);
+                session.Manager.Save();
+                Assert.Same(summer,SeasonVisualController.SnowWrittenTo);
                 Assert.Equal(1.25d, session.Runtime.CurrentState.Phase);
                 Assert.Equal(7f, session.Settings.DaysPerSeason);
                 Assert.False(session.Settings.AutomaticCycle);
@@ -157,6 +163,94 @@ namespace DVSeasons.Tests
                 SeasonSaveState stored;
                 Assert.True(SeasonSaveData.TryRead(save, out stored));
                 Assert.Equal(2d, stored.Phase);
+            }
+        }
+
+        [Fact]
+        public void ManualSeasonSelectionClearsStaleEffectsAndUpdatesSunImmediately()
+        {
+            using (var session = new Session(3d))
+            {
+                session.Enter(SavedCalendar(3d, 14f, 3f));
+                WeatherAdapter.ResetAppliedOverrides();
+                WeatherAdapter.DayMinutes = 3;
+                WeatherAdapter.DayOverridden = WeatherAdapter.WetnessOverridden = WeatherAdapter.ThunderOverridden = true;
+                session.Runtime.SetSeason(SeasonKind.Summer);
+                Assert.Equal(60, WeatherAdapter.DayMinutes);
+                Assert.False(WeatherAdapter.DayOverridden);
+                Assert.False(WeatherAdapter.WetnessOverridden);
+                Assert.False(WeatherAdapter.ThunderOverridden);
+                Assert.Equal(1, WeatherAdapter.SeasonResetCount);
+                Assert.Equal(1, WeatherAdapter.SeasonRefreshCount);
+                Assert.Equal(SeasonKind.Summer, WeatherAdapter.LastClimateState.Current);
+
+                session.Runtime.Tick(.02f);
+                Assert.Equal(1, WeatherAdapter.SeasonResetCount);
+                session.Runtime.SetSeason(SeasonKind.Summer);
+                Assert.Equal(2, WeatherAdapter.SeasonResetCount);
+            }
+        }
+
+        [Fact]
+        public void AutomaticBoundaryResetsOnceWithoutResettingCalendarClock()
+        {
+            using (var session = new Session(3.99d))
+            {
+                session.Enter(SavedCalendar(3.99d, 14f, 3f));
+                WeatherAdapter.ResetAppliedOverrides();
+                WeatherAdapter.Clock = WeatherAdapter.Clock.Value.AddDays(1);
+                session.Runtime.Tick(.02f);
+                Assert.Equal(1, WeatherAdapter.SeasonResetCount);
+                Assert.Equal(SeasonKind.Spring, WeatherAdapter.LastClimateState.Current);
+                var phase = session.Runtime.CurrentState.Phase;
+                WeatherAdapter.Clock = WeatherAdapter.Clock.Value.AddDays(1);
+                session.Runtime.Tick(.02f);
+                Assert.Equal(1, WeatherAdapter.SeasonResetCount);
+                Assert.Equal(phase + 1d / 14d, session.Runtime.CurrentState.Phase, 8);
+            }
+        }
+
+        [Fact]
+        public void DirectSeasonSelectionUpdatesOwnedWeatherOverridesImmediately()
+        {
+            using (var session = new Session(3d))
+            {
+                session.Enter(SavedCalendar(3d, 14f, 3f));
+                WeatherAdapter.ResetAppliedOverrides();
+
+                session.Runtime.SetSeason(SeasonKind.Spring);
+                Assert.Equal(1, WeatherAdapter.AdhesionApplyCount);
+                Assert.Equal(1, WeatherAdapter.ThunderApplyCount);
+                Assert.Equal(0f, WeatherAdapter.LastAdhesionState.WinterWetnessEquivalent);
+                Assert.Equal(0f, WeatherAdapter.LastThunderState.SnowAmount);
+
+                session.Runtime.SetSeason(SeasonKind.Winter);
+                Assert.Equal(2, WeatherAdapter.AdhesionApplyCount);
+                Assert.Equal(2, WeatherAdapter.ThunderApplyCount);
+                Assert.True(WeatherAdapter.LastAdhesionState.WinterWetnessEquivalent > 0f);
+                Assert.True(WeatherAdapter.LastThunderState.SnowAmount > 0f);
+            }
+        }
+
+        [Fact]
+        public void AdvancingSeasonUpdatesOwnedWeatherOverridesImmediately()
+        {
+            using (var session = new Session(2d))
+            {
+                session.Enter(SavedCalendar(2d, 14f, 3f));
+                WeatherAdapter.ResetAppliedOverrides();
+
+                session.Runtime.AdvanceToNextSeason();
+                Assert.Equal(SeasonKind.Winter, WeatherAdapter.LastAdhesionState.Current);
+                Assert.True(WeatherAdapter.LastAdhesionState.WinterWetnessEquivalent > 0f);
+                Assert.True(WeatherAdapter.LastThunderState.SnowAmount > 0f);
+
+                session.Runtime.AdvanceToNextSeason();
+                Assert.Equal(SeasonKind.Spring, WeatherAdapter.LastAdhesionState.Current);
+                Assert.Equal(0f, WeatherAdapter.LastAdhesionState.WinterWetnessEquivalent);
+                Assert.Equal(0f, WeatherAdapter.LastThunderState.SnowAmount);
+                Assert.Equal(2, WeatherAdapter.AdhesionApplyCount);
+                Assert.Equal(2, WeatherAdapter.ThunderApplyCount);
             }
         }
 
@@ -190,6 +284,8 @@ namespace DVSeasons.Tests
                 session.Runtime.Tick(0.02f);
                 Assert.Equal(host.Phase, session.Runtime.CurrentState.Phase);
                 session.Manager.Save();
+                Assert.Null(SeasonVisualController.SnowWrittenTo);
+                Assert.Null(SeasonVisualController.SnowRestoredFrom);
                 SeasonSaveState unchanged;
                 Assert.True(SeasonSaveData.TryRead(localSave, out unchanged));
                 Assert.Equal(1.25d, unchanged.Phase);
@@ -306,6 +402,84 @@ namespace DVSeasons.Tests
             Assert.Equal(0f, settings.SurfaceSnowStrength);
         }
 
+        [Fact]
+        public void SeasonResetWaitsForWeatherDriverAfterLoading()
+        {
+            using (var session = new Session(3d))
+            {
+                WeatherAdapter.Clock = null;
+                WeatherAdapter.ResetAppliedOverrides();
+                session.Enter(new SaveGameData());
+                session.Runtime.SetSeason(SeasonKind.Summer);
+                Assert.Equal(0, WeatherAdapter.SeasonResetCount);
+
+                WeatherAdapter.DayMinutes = 3f;
+                WeatherAdapter.DayOverridden = true;
+                WeatherAdapter.Clock = new DateTime(2026, 1, 1);
+                session.Runtime.Tick(0.02f);
+                Assert.Equal(1, WeatherAdapter.SeasonResetCount);
+                Assert.Equal(60f, WeatherAdapter.DayMinutes);
+                Assert.False(WeatherAdapter.DayOverridden);
+                Assert.Equal(SeasonKind.Summer, WeatherAdapter.LastClimateState.Current);
+            }
+        }
+
+        [Fact]
+        public void ClientKeepsHostSnowThroughLoadingAndReappliesRepeatedSeasonSelectionOnce()
+        {
+            var net = new TestNetwork { IsSessionActive = true, IsAuthority = false };
+            using (var session = new Session(1d, net))
+            {
+                session.Runtime.Start();
+                var state = SeasonNetworkState.FromState(new SeasonState(3d, SeasonKind.Winter,
+                    SeasonKind.Spring, 0f, 1f, -20f, .4f), 14f, 3f);
+                state.SeasonSelectionRevision = 5;
+                state.HasSurfaceSnowCoverage = true;
+                state.SurfaceSnowCoverage = .42f;
+                int initial = SeasonVisualController.SelectionCount;
+                net.Receive(state); // Before native world/visuals exist.
+                session.Prepare(new SaveGameData());
+                session.Runtime.Tick(.02f);
+                Assert.Equal(initial, SeasonVisualController.SelectionCount);
+                WorldStreamingInit.FinishLoading();
+                session.Runtime.Tick(.02f);
+                Assert.Equal(initial + 1, SeasonVisualController.SelectionCount);
+                Assert.Equal(.42f, SeasonVisualController.LastHostCoverage);
+                Assert.False(SeasonalThermalController.SimulateLocally);
+                net.Receive(state);
+                session.Runtime.Tick(.02f);
+                Assert.Equal(initial + 1, SeasonVisualController.SelectionCount);
+                WeatherAdapter.ResetAppliedOverrides();
+                state.SeasonSelectionRevision++;
+                state.SurfaceSnowCoverage = 1f;
+                net.Receive(state);
+                session.Runtime.Tick(.02f);
+                Assert.Equal(initial + 2, SeasonVisualController.SelectionCount);
+                Assert.Equal(1, WeatherAdapter.SeasonResetCount);
+                Assert.Equal(1f, SeasonVisualController.LastHostCoverage);
+                net.Receive(state);
+                session.Runtime.Tick(.02f);
+                Assert.Equal(1, WeatherAdapter.SeasonResetCount);
+            }
+        }
+
+        [Fact]
+        public void HostAloneRunsSeasonalPowertrainSimulation()
+        {
+            var net = new TestNetwork();
+            using (var session = new Session(3d, net))
+            {
+                session.Enter(new SaveGameData());
+                Assert.True(SeasonalThermalController.SimulateLocally);
+                uint revision = net.LastPublished.SeasonSelectionRevision;
+                session.Runtime.SetSeason(SeasonKind.Summer);
+                Assert.True(SeasonalThermalController.SimulateLocally);
+                Assert.Equal(revision + 1, net.LastPublished.SeasonSelectionRevision);
+                session.Runtime.SetSeason(SeasonKind.Summer);
+                Assert.Equal(revision + 2, net.LastPublished.SeasonSelectionRevision);
+            }
+        }
+
         private static SaveGameData SavedCalendar(double phase, float days, float transition,
             bool automatic = true, bool randomTransitionDuration = true)
         {
@@ -334,6 +508,7 @@ namespace DVSeasons.Tests
                 WeatherAdapter.Clock = new DateTime(2026, 1, 1);
                 UnityEngine.Time.realtimeSinceStartup = 0f;
                 SeasonVisualController.ResetCount = 0;
+                SeasonVisualController.SnowRestoredFrom=SeasonVisualController.SnowWrittenTo=null;
                 SeasonVisualController.LastApplied = null;
                 Settings = new SeasonModSettings
                 {
@@ -372,6 +547,7 @@ namespace DVSeasons.Tests
 
         private sealed class TestNetwork : ISeasonNetworkBridge
         {
+            public SeasonNetworkState LastPublished;
             public bool IsAvailable { get { return true; } }
             public bool IsSessionActive { get; set; }
             public bool IsAuthority { get; set; } = true;
@@ -380,7 +556,7 @@ namespace DVSeasons.Tests
             public void Receive(SeasonNetworkState state) { StateReceived?.Invoke(state); }
             public void Initialize(string id) { }
             public void SetEnabled(bool enabled) { }
-            public void Publish(SeasonNetworkState state, bool force) { }
+            public void Publish(SeasonNetworkState state, bool force) { LastPublished = state; }
             public void RequestState() { }
             public void Dispose() { }
         }

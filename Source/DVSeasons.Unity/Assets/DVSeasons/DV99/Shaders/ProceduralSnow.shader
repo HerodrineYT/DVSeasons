@@ -23,7 +23,7 @@ Shader "Hidden/DVSeasons/ProceduralSnow"
             #pragma fragment frag
             #include "UnityCG.cginc"
             sampler2D _DVPSDiffuse, _DVPSSpecular, _DVPSNormal, _DVPSLighting;
-            sampler2D _DVPSNearHeight, _DVPSFarHeight;
+            sampler2D _DVPSNearHeight, _DVPSFarHeight, _DVPSDistantHeight;
             sampler2D _DVPSVehicleData;
             UNITY_DECLARE_TEX2DARRAY(_DVPSVehicleHeights);
             UNITY_DECLARE_TEX2DARRAY(_DVPSVehicleSnow);
@@ -32,11 +32,12 @@ Shader "Hidden/DVSeasons/ProceduralSnow"
             float _DVPSVehicleSnowRemaining[32];
             UNITY_DECLARE_DEPTH_TEXTURE(_CameraDepthTexture);
             float4x4 _DVPSInverseVP;
-            float4 _DVPSNearArea, _DVPSFarArea;
+            float4 _DVPSNearArea, _DVPSFarArea, _DVPSDistantArea;
             float3 _DVPSWorldOffset;
-            float2 _DVPSHeightOffsets;
+            float3 _DVPSHeightOffsets;
             float4 _DVPSAmbient;
             float _DVPSAmount, _DVPSHDR;
+            float _DVPSGlareReduction;
             struct v2f { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
             v2f vert(appdata_img v)
             {
@@ -97,11 +98,15 @@ Shader "Hidden/DVSeasons/ProceduralSnow"
                 float3 world = wp.xyz/wp.w;
                 half4 n0=tex2D(_DVPSNormal,i.uv);
                 float3 n=normalize(n0.xyz*2-1);
-                float slope = smoothstep(0.25,0.85,n.y);
+                // Vehicle slope comes from its mesh, independently of the
+                // material normal map and screen-space depth discontinuities.
+                float normalY=vehicle.w>0.5?saturate((vehicle.w-floor(vehicle.w+0.5))*4):n.y;
+                float slope = vehicle.w>0.5 ? smoothstep(0.12,0.65,normalY) : smoothstep(0.25,0.85,n.y);
                 if (slope <= 0) discard;
                 float nearDistance = max(abs(world.x-_DVPSNearArea.x),abs(world.z-_DVPSNearArea.y));
                 float farDistance = max(abs(world.x-_DVPSFarArea.x),abs(world.z-_DVPSFarArea.y));
-                float limit = 1-smoothstep(_DVPSFarArea.z*0.85,_DVPSFarArea.z*0.97,farDistance);
+                float distantDistance = max(abs(world.x-_DVPSDistantArea.x),abs(world.z-_DVPSDistantArea.y));
+                float limit = 1-smoothstep(_DVPSDistantArea.z*0.85,_DVPSDistantArea.z*0.97,distantDistance);
                 if (limit <= 0) discard;
                 float shelter;
                 if (nearDistance < _DVPSNearArea.z*0.8)
@@ -109,6 +114,9 @@ Shader "Hidden/DVSeasons/ProceduralSnow"
                 else
                 {
                     shelter=exposure(_DVPSFarHeight,_DVPSFarArea,_DVPSHeightOffsets.y,world,n.y);
+                    if (farDistance > _DVPSFarArea.z*.8)
+                        shelter=lerp(shelter,exposure(_DVPSDistantHeight,_DVPSDistantArea,_DVPSHeightOffsets.z,world,n.y),
+                            smoothstep(_DVPSFarArea.z*.8,_DVPSFarArea.z*.95,farDistance));
                     if (nearDistance < _DVPSNearArea.z*0.95)
                         shelter=lerp(exposure(_DVPSNearHeight,_DVPSNearArea,_DVPSHeightOffsets.x,world,n.y),shelter,
                             smoothstep(_DVPSNearArea.z*0.8,_DVPSNearArea.z*0.95,nearDistance));
@@ -122,7 +130,7 @@ Shader "Hidden/DVSeasons/ProceduralSnow"
                     int slot=(int)(vehicle.w+0.5)-1;
                     float4 area=_DVPSVehicleSnowAreas[slot];
                     float2 uv=(pattern.xz-area.xy)/(2*area.zw)+0.5;
-                    shelter=vehicleExposure(pattern,slot,n.y)*UNITY_SAMPLE_TEX2DARRAY(_DVPSVehicleSnow,float3(uv,slot)).r*_DVPSVehicleSnowRemaining[slot];
+                    shelter=vehicleExposure(pattern,slot,normalY)*UNITY_SAMPLE_TEX2DARRAY(_DVPSVehicleSnow,float3(uv,slot)).r*_DVPSVehicleSnowRemaining[slot];
                 }
                 float rank = noise(pattern*0.8)*0.7+noise(pattern*3.2)*0.3;
                 float edge=max(0.10,fwidth(rank));
@@ -134,6 +142,7 @@ Shader "Hidden/DVSeasons/ProceduralSnow"
 
                 float grain = lerp(0.5,noise(pattern*32),1-saturate(length(fwidth(pattern))*24));
                 half3 snow=half3(0.78,0.81,0.84)*lerp(0.92,1.0,grain);
+                snow *= lerp(1,.55,saturate(_DVPSGlareReduction*.5));
                 #if defined(DVPS_FAST_HDR)
                 // Hardware blending keeps the native buffers in place. Powder
                 // lowers smoothness towards zero; AO and lighting alpha survive.

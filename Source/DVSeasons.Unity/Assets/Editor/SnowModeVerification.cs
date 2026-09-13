@@ -54,6 +54,17 @@ namespace DVSeasons.AssetBundleBuild
                 type.GetField("BeforeSnowRender").SetValue(controller, new Action(() => callbacks++));
                 weather.Invoke(controller, new object[] { 1f });
                 var bare = Sample(camera);
+                // Reproduce a dry summer -> manually selected winter without
+                // touching the legacy/dynamic toggle.
+                weather.Invoke(controller, new object[] { 0f });
+                apply.Invoke(controller, new object[] { 0f, true });
+                Sample(camera);
+                type.GetMethod("ReseedSeasonCoverage").Invoke(controller,null);
+                apply.Invoke(controller, new object[] { .8f, true }); Sample(camera);
+                apply.Invoke(controller, new object[] { .8f, true });
+                Require(Sample(camera)>bare+.1f,"Dry manual winter selection left summer's empty cover.");
+                apply.Invoke(controller,new object[]{0f,false});
+                Debug.Log("DVSeasons dry summer-to-winter snow rendering verified without mode toggle.");
                 for (int cycle = 0; cycle < 3; cycle++)
                 {
                     // A dry re-enable still initializes from the current season.

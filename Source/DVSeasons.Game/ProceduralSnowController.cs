@@ -22,6 +22,7 @@ namespace DVSeasons.Mod
         private readonly SeasonAssetBundleRepository repository;
         private readonly ExposureMap near = new ExposureMap();
         private readonly ExposureMap far = new ExposureMap();
+        private readonly ExposureMap distant = new ExposureMap();
         private readonly Vector3[] ambientDirections = { Vector3.up };
         private readonly Color[] ambientColors = new Color[1];
         private struct TerrainCaptureState
@@ -35,10 +36,12 @@ namespace DVSeasons.Mod
         private float nextProxyRefresh;
         public readonly RailSnowTracks RailTracks = new RailSnowTracks();
         public Action BeforeSnowRender;
+        public float GlareReduction;
         public void SetVehicleDiscovery(Func<IEnumerable<Component>> discovery) { vehicles.DiscoverVehicles=discovery; }
         public void SetVehicleSnowRemaining(Func<Component,float> remaining) {vehicles.SnowRemaining=remaining;}
+        public void SetVehicleSaveIdentity(Func<Component,string> identity) {vehicles.StableVehicleId=identity;}
         public void SetNativeVehicleSnow(Func<Renderer,int,bool> hasTexture) {vehicles.HasNativeSnowTexture=hasTexture;}
-        public void InvalidateGeometry() { near.GeometryDirty=far.GeometryDirty=true; }
+        public void InvalidateGeometry() { near.GeometryDirty=far.GeometryDirty=distant.GeometryDirty=true; }
         private void SceneLoaded(Scene scene,LoadSceneMode mode) { InvalidateGeometry(); }
         private void SceneUnloaded(Scene scene) { InvalidateGeometry(); }
         private Vector3 worldOffset;
@@ -46,7 +49,7 @@ namespace DVSeasons.Mod
         {
             var delta=offset-worldOffset;
             if(delta==Vector3.zero) return;
-            ShiftExposure(near,delta); ShiftExposure(far,delta);
+            ShiftExposure(near,delta); ShiftExposure(far,delta); ShiftExposure(distant,delta);
             worldOffset=offset;
         }
         private static void ShiftExposure(ExposureMap map,Vector3 delta)
@@ -56,9 +59,17 @@ namespace DVSeasons.Mod
             map.HeightOffset+=delta.y;
         }
         private float snowfall;
+        private float? hostCoverage;
+        public void SetNetworkCoverage(float? coverage) { hostCoverage = coverage; }
         private bool coverageInitialized;
         private Texture2D noiseTexture;
         public float Coverage => amount;
+        public bool HasCoverage => coverageInitialized;
+        public void ReseedSeasonCoverage() { coverageInitialized = false; }
+        public void SaveSnow(SnowWorldSave state)
+        { state.HasCoverage=coverageInitialized; state.Coverage=amount; RailTracks.Save(state.Rails); vehicles.SaveMasks(state.VehicleMasks); }
+        public void RestoreSnow(SnowWorldSave state)
+        { amount=state.Coverage; coverageInitialized=state.HasCoverage; RailTracks.Restore(state.Rails); vehicles.RestoreMasks(state.VehicleMasks); }
         public void SetWeather(float intensity) { snowfall=Mathf.Clamp01(intensity); }
         public int ExposureCaptureCount { get; private set; }
         private static readonly int DiffuseId = Shader.PropertyToID("_DVPSDiffuse");
@@ -97,7 +108,9 @@ namespace DVSeasons.Mod
             }
             coverage=Mathf.Clamp01(coverage);
             if(coverage<=0.001f && amount>0.001f) vehicles.ResetSnow();
-            if (!coverageInitialized || snowfall>0.001f || coverage<=0.001f)
+            if (hostCoverage.HasValue && coverage > 0.001f)
+            { amount=Mathf.Clamp01(hostCoverage.Value); coverageInitialized=true; }
+            else if (!coverageInitialized || snowfall>0.001f || coverage<=0.001f)
             { amount=coverage; coverageInitialized=true; }
             RailTracks.Advance(snowfall,Time.deltaTime);
             var camera = Camera.main;
@@ -119,9 +132,9 @@ namespace DVSeasons.Mod
                 SceneManager.sceneLoaded += SceneLoaded;
                 SceneManager.sceneUnloaded += SceneUnloaded;
                 subscribed = true;
-                near.Ready = far.Ready = false;
+                near.Ready = far.Ready = distant.Ready = false;
                 Debug.Log("[DVSeasons] Procedural snow bound to deferred camera '" + camera.name +
-                    "': world-position coverage, 256m/2048m exposure maps, no object winter textures.");
+                    "': 256m/2048m detail maps and distant coverage to the game camera far clip.");
             }
             IsActive = true;
             if (amount <= 0.001f) { commands.Clear(); return; }
@@ -141,6 +154,8 @@ namespace DVSeasons.Mod
                 // frames so entering a world cannot issue both auxiliary renders at once.
                 if(nearWasReady && (!far.Ready || ExposureCaptureCount==capturesBefore))
                     UpdateExposure(far,1024f,120f);
+                if(far.Ready && ExposureCaptureCount==capturesBefore)
+                    UpdateExposure(distant,Mathf.Max(2048f,Mathf.Ceil(camera.farClipPlane*2.5f/256f)*256f),240f);
                 if(near.Ready && far.Ready)
                     vehicles.Accumulate(near.Texture,near.Area,near.HeightOffset,far.Texture,far.Area,far.HeightOffset,RailTracks.SnowClock);
             }
@@ -223,7 +238,7 @@ namespace DVSeasons.Mod
         private void UpdateExposure(ExposureMap map, float radius, float interval)
         {
             var position = worldCamera.transform.position;
-            if (map.Ready && (!map.GeometryDirty || Time.realtimeSinceStartup<nextProxyRefresh) &&
+            if (map.Ready && Mathf.Abs(map.Area.z-radius)<1 && (!map.GeometryDirty || Time.realtimeSinceStartup<nextProxyRefresh) &&
                 (snowfall<=0.001f || Time.realtimeSinceStartup < map.NextUpdate) &&
                 Mathf.Abs(position.x-map.Area.x) < radius*0.5f && Mathf.Abs(position.z-map.Area.y) < radius*0.5f) return;
             const int size = 1024;
@@ -337,9 +352,12 @@ namespace DVSeasons.Mod
             commands.SetGlobalTexture("_DVPSFarHeight",far.Texture);
             commands.SetGlobalVector("_DVPSNearArea",near.Area);
             commands.SetGlobalVector("_DVPSFarArea",far.Area);
+            commands.SetGlobalTexture("_DVPSDistantHeight",distant.Ready?distant.Texture:far.Texture);
+            commands.SetGlobalVector("_DVPSDistantArea",distant.Ready?distant.Area:far.Area);
             commands.SetGlobalVector("_DVPSWorldOffset",worldOffset);
-            commands.SetGlobalVector("_DVPSHeightOffsets",new Vector4(near.HeightOffset,far.HeightOffset,0,0));
+            commands.SetGlobalVector("_DVPSHeightOffsets",new Vector4(near.HeightOffset,far.HeightOffset,distant.Ready?distant.HeightOffset:far.HeightOffset,0));
             commands.SetGlobalFloat("_DVPSAmount",amount);
+            commands.SetGlobalFloat("_DVPSGlareReduction",GlareReduction);
             commands.SetGlobalFloat("_DVPSHDR",camera.allowHDR ? 1f : 0f);
             var probe = RenderSettings.ambientProbe;
             probe.Evaluate(ambientDirections,ambientColors);
@@ -375,16 +393,17 @@ namespace DVSeasons.Mod
         {
             Unbind();
             vehicles.Dispose(); RailTracks.Dispose(); coverageInitialized=false;
+            hostCoverage = null;
             exposureExclusions.Dispose();nextProxyRefresh=0;
-            near.GeometryDirty=far.GeometryDirty=false;
+            near.GeometryDirty=far.GeometryDirty=distant.GeometryDirty=false;
             worldOffset=Vector3.zero;
             if (exposureCamera != null) DestroyResource(exposureCamera.gameObject);
-            DestroyResource(near.Texture); DestroyResource(far.Texture);
+            DestroyResource(near.Texture); DestroyResource(far.Texture); DestroyResource(distant.Texture);
             DestroyResource(material); DestroyResource(quad); DestroyResource(noiseTexture); noiseTexture=null;
             DestroyResource(terrainExposureMaterial);terrainExposureMaterial=null;
             if(terrainExposureCommands!=null) terrainExposureCommands.Dispose();terrainExposureCommands=null;
-            exposureCamera = null; near.Texture = far.Texture = null; material = null; quad = null;
-            near.Ready = far.Ready = false; nextLoadAttempt = renderRetryAfter = 0; failureLogged = false;
+            exposureCamera = null; near.Texture = far.Texture = distant.Texture = null; material = null; quad = null;
+            near.Ready = far.Ready = distant.Ready = false; nextLoadAttempt = renderRetryAfter = 0; failureLogged = false;
         }
 
         private static void DestroyResource(UnityEngine.Object resource)

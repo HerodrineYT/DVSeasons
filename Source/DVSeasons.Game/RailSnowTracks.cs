@@ -37,6 +37,41 @@ namespace DVSeasons.Mod
         public void Advance(float snowfall, float seconds)
         { SnowClock += Mathf.Clamp01(snowfall)*Mathf.Max(0,seconds)/180f; }
 
+        public void Save(List<RailSnowStamp> destination)
+        {
+            foreach (var chunk in chunks)
+                for (int n=0; n+3<chunk.Vertices.Count; n+=4)
+                {
+                    float age=SnowClock-chunk.Uv[n].y;
+                    if (age>=1) continue;
+                    destination.Add(new RailSnowStamp {
+                        A=(chunk.Vertices[n]+chunk.Vertices[n+1])*.5f,
+                        B=(chunk.Vertices[n+2]+chunk.Vertices[n+3])*.5f,
+                        Width=(chunk.Vertices[n+1]-chunk.Vertices[n])*.5f, Age=Mathf.Max(0,age) });
+                }
+        }
+        public void Restore(List<RailSnowStamp> records)
+        {
+            Dispose();
+            if (records==null) return;
+            var wheel=new Wheel();
+            for (int i=0; i<Math.Min(records.Count,65536); i++)
+            {
+                var record=records[i];
+                if (record==null || !record.IsValid() || record.Age>=1) continue;
+                SnowClock=-record.Age;
+                Add(record.A,record.B,record.Width,wheel,0);
+            }
+            // Timestamps are relative to the snowfall clock, which is paused
+            // while the save is closed and during dry weather.
+            SnowClock=0;
+            foreach(var chunk in chunks)
+            {
+                chunk.LastStamp=float.NegativeInfinity;
+                foreach(var uv in chunk.Uv) chunk.LastStamp=Mathf.Max(chunk.LastStamp,uv.y);
+            }
+        }
+
         public void WheelAt(int id, Vector3 position, Vector3 right, Vector3 forward)
         {
             position-=WorldOffset;
