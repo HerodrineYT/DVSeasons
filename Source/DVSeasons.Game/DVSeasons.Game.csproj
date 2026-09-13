@@ -3,7 +3,7 @@
     <TargetFramework>net48</TargetFramework>
     <AssemblyName>DVSeasons</AssemblyName>
     <RootNamespace>DVSeasons.Mod</RootNamespace>
-    <Version>0.3.33</Version>
+    <Version>0.3.1</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <DVSeasonsRuntimeResources Condition="'$(DVSeasonsRuntimeResources)' == '' and Exists('$(MSBuildProjectDirectory)\..\Resources\Runtime\AssetBundles\dvseasons_dv99')">$(MSBuildProjectDirectory)\..\Resources\Runtime</DVSeasonsRuntimeResources>
     <DVSeasonsRuntimeResources Condition="'$(DVSeasonsRuntimeResources)' == '' and Exists('$(MSBuildProjectDirectory)\..\..\AssetBundles\dvseasons_dv99')">$(MSBuildProjectDirectory)\..\..</DVSeasonsRuntimeResources>
