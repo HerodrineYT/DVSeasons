@@ -6,6 +6,28 @@ namespace DVSeasons.AssetBundleBuild
 {
     public static class AutumnLeafVerification
     {
+        public static void Run()
+        {
+            int code=0;
+            AssetBundle bundle=null;
+            try
+            {
+                var path=System.IO.Path.GetFullPath(System.IO.Path.Combine(Application.dataPath,
+                    "../../artifacts/build/assetbundle-lz4/dvseasons_dv99"));
+                bundle=AssetBundle.LoadFromFile(path);
+                if(bundle==null)throw new Exception("Built bundle missing");
+                IceShaderVerification.Verify(bundle);
+                WinterWindowVerification.Verify(bundle);
+                Verify(bundle);
+                SpringTerrainVerification.Verify(bundle);
+                SnowGlareVerification.Verify(bundle);
+                Debug.Log("BUILT_BUNDLE_GPU_OK");
+            }
+            catch(Exception e){Debug.LogException(e);code=1;}
+            finally{if(bundle!=null)bundle.Unload(true);}
+            UnityEditor.EditorApplication.Exit(code);
+        }
+
         public static void Verify(AssetBundle bundle)
         {
             var shader=bundle.LoadAsset<Shader>("assets/dvseasons/dv99/shaders/autumnleaf.shader");
@@ -37,8 +59,12 @@ namespace DVSeasons.AssetBundleBuild
                     float sum=0;foreach(var c in pixels.GetPixels())sum+=c.r;return sum/4096;
                 };
                 float day=draw(1,0),overcast=draw(0,.2f),night=draw(0,.002f),dark=draw(0,0);
-                if(day<.2f || overcast<.15f || night>overcast*.04f || dark>.001f)
+                if(day<.4f || overcast<.04f || night>overcast*.04f || dark>.001f)
                     throw new Exception("Leaf scene lighting mismatch: "+day+","+overcast+","+night+","+dark);
+                // A merely non-emissive shader can still make foliage stand out
+                // on dark ground. Check a dim but nonzero sky probe as well.
+                float dim=draw(0,.015f);
+                if(dim>.004f) throw new Exception("Dim sky probe still overlights ground leaves: "+dim);
                 Debug.Log("DVSeasons leaf GPU verified: day="+day+", overcast="+overcast+
                     ", night="+night+", dark="+dark+", no emission.");
             }

@@ -33,6 +33,20 @@ Shader "Hidden/DVSeasons/AutumnLeaf"
                 // No emission, additive blending or camera-distance soft fade.
                 o.ambient=max(0,lerp(_LeafAmbientEquator,
                     n.y>=0 ? _LeafAmbientSky : _LeafAmbientGround, abs(n.y)));
+                // The global sky probe is unoccluded at ground level. Dampen
+                // its contribution most in low light, instead of letting every
+                // fallen leaf retain a bright sky-facing colour in the dark.
+                half3 linearAmbient = o.ambient;
+                #ifdef UNITY_COLORSPACE_GAMMA
+                linearAmbient = GammaToLinearSpace(linearAmbient);
+                #endif
+                half ambientLuma = dot(linearAmbient, half3(.2126,.7152,.0722));
+                half ambientResponse = lerp(.18,.72,smoothstep(.015,.18,ambientLuma));
+                #ifdef UNITY_COLORSPACE_GAMMA
+                o.ambient = LinearToGammaSpace(linearAmbient * ambientResponse);
+                #else
+                o.ambient *= ambientResponse;
+                #endif
                 // No directional light is selected during some weather states.
                 // normalize(0) can produce NaN; 0 * NaN would erase ambient too.
                 float3 lightDirection = UnityWorldSpaceLightDir(p);
@@ -50,6 +64,9 @@ Shader "Hidden/DVSeasons/AutumnLeaf"
             fixed4 frag(output i):SV_Target
             {
                 fixed4 c=tex2D(_MainTex,i.uv)*i.color; clip(c.a-.08);
+                // Dry fallen foliage is muted, unlike backlit leaves in a crown.
+                half pigmentLuma = dot(c.rgb, half3(.2126,.7152,.0722));
+                c.rgb = lerp(c.rgb,pigmentLuma.xxx,.12) * .72;
                 c.rgb*=i.ambient+i.sunlight*SHADOW_ATTENUATION(i);
                 UNITY_APPLY_FOG(i.fogCoord,c); return c;
             }

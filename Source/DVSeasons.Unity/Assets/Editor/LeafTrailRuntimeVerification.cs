@@ -22,7 +22,7 @@ namespace DVSeasons.AssetBundleBuild
         {
             var root = Path.GetFullPath(Path.Combine(Application.dataPath, "../.."));
             var modPath = Path.Combine(root, "artifacts/build/DVSeasons");
-            var output = Path.Combine(root, "artifacts/verification/0.3.33-leaves");
+            var output = Path.Combine(root, "artifacts/verification/0.3.13-lifetime-heater");
             var game = Environment.GetEnvironmentVariable("DVSEASONS_VERIFY_GAME");
             ResolveEventHandler resolve = (s, e) =>
             {
@@ -42,7 +42,9 @@ namespace DVSeasons.AssetBundleBuild
                 var mod = Assembly.LoadFrom(Path.Combine(modPath, "DVSeasons.dll"));
                 VerifyLeaves(mod, modPath, output);
                 VerifyTrail(mod, modPath);
-                Debug.Log("LEAF_TRAIL_RUNTIME_OK: leaf species/colour atlas, flight collisions, moving surfaces, roof occlusion, lighting, snowflake size.");
+                VerifyRailContacts(mod);
+                VerifyAxleContactHeights(mod);
+                Debug.Log("LEAF_TRAIL_RUNTIME_OK: leaf species/colour atlas, flight collisions, moving surfaces, roof occlusion, lighting, native per-car dust size and position.");
             }
             catch (Exception e) { Debug.LogException(e); code = 1; }
             finally { AppDomain.CurrentDomain.AssemblyResolve -= resolve; }
@@ -382,35 +384,236 @@ namespace DVSeasons.AssetBundleBuild
 
         private static void VerifyTrail(Assembly mod, string modPath)
         {
-            var type = mod.GetType("DVSeasons.Mod.TrainSnowTrailController", true);
-            var trail = Activator.CreateInstance(type, All, null, new object[] { modPath }, null);
+            var type=mod.GetType("DVSeasons.Mod.TrainSnowTrailController",true);
+            var repositoryType=mod.GetType("DVSeasons.Mod.SeasonAssetBundleRepository",true);
+            var repository=Activator.CreateInstance(repositoryType,new object[]{modPath});
+            var bundle=AssetBundle.LoadFromFile(Path.Combine(modPath,"AssetBundles/dvseasons_dv99"));
+            repositoryType.GetProperty("Bundle").GetSetMethod(true).Invoke(repository,new object[]{bundle});
+            var trail=Activator.CreateInstance(type,All,null,new object[]{repository},null);
+            var nativeObject=new GameObject("native dust fixture");
+            var native=nativeObject.AddComponent<ParticleSystem>();
+            var nativeMain=native.main;nativeMain.startSize=8f;
+            var nativeMaterial=new Material(Shader.Find("Particles/Standard Unlit"));
+            var nativeTexture=new Texture2D(4,4,TextureFormat.RGBA32,false,false);
+            var originalPixels=new Color32[16];
+            for(int i=0;i<16;i++)originalPixels[i]=new Color32(110,65,28,(byte)(i*17));
+            nativeTexture.SetPixels32(originalPixels);nativeTexture.Apply();nativeMaterial.mainTexture=nativeTexture;
+            nativeObject.GetComponent<ParticleSystemRenderer>().sharedMaterial=nativeMaterial;
+            var poseObject=new GameObject("car pose");
             try
             {
-                Call(trail, "EnsureParticles");
-                var particles = (ParticleSystem)Get(trail, "particles");
-                Require(particles != null, "Snow trail renderer unavailable");
-                var main = particles.main; var sheet = particles.textureSheetAnimation;
-                Require(Mathf.Abs(main.startSize.constantMin - .05f) < .0001f &&
-                    Mathf.Abs(main.startSize.constantMax - .17f) < .0001f && !particles.sizeOverLifetime.enabled,
-                    "Trail enlarged the individual snowfall flakes");
-                Require(sheet.enabled && sheet.numTilesX == 4 && sheet.numTilesY == 4,
-                    "Trail does not use the shared snowflake atlas");
-                var emission = particles.emission;
-                emission.rateOverTimeMultiplier = 4200; emission.rateOverDistanceMultiplier = 0;
-                particles.Simulate(4, true, true, true);
-                Require(particles.particleCount > 6000, "Dense trail is prematurely capped: " + particles.particleCount);
-                var buffer = new ParticleSystem.Particle[main.maxParticles];
-                var count = particles.GetParticles(buffer);
-                for (var i = 0; i < count; i++)
-                    Require(buffer[i].GetCurrentSize(particles) >= .0499f && buffer[i].GetCurrentSize(particles) <= .1701f,
-                        "Snowflake size changed during its lifetime");
-                Debug.Log("Runtime snow trail verified: " + count + " individual flakes, 0.05–0.17 m, 16 atlas shapes.");
+                SnowDustVerification.Verify(bundle);
+                Call(trail,"EnsureParticles",native);
+                var particles=(ParticleSystem)Get(trail,"particles");
+                Require(particles!=null,"Native dust unavailable");
+                var recoloured=(Texture2D)Get(trail,"snowTexture");
+                var recolouredPixels=recoloured.GetPixels32();
+                Require(recoloured!=nativeTexture,"Shared derailment texture was changed");
+                for(int i=0;i<16;i++)
+                {
+                    var p=recolouredPixels[i];
+                    Require(p.r>225 && p.b>=p.g && p.g>=p.r,"Dust still has an earth-coloured tint");
+                    Require(Math.Abs(p.a-originalPixels[i].a)<=1,"Dust recolouring changed transparency");
+                    Require(nativeTexture.GetPixels32()[i].Equals(originalPixels[i]),"Native dust texture mutated");
+                }
+                File.WriteAllBytes(Path.Combine(modPath,"../../verification/0.3.13-snow-dust.png"),recoloured.EncodeToPNG());
+                Require(((Material)Get(trail,"material")).shader.name=="DVSeasons/SnowDust","Native earth-dust shader still used");
+                Require(Mathf.Abs(particles.main.startSize.constant-.5f)<.001f,"Dust size is not 25% of the previous trail (6.25% of native)");
+                Require(!particles.emission.enabled,"Automatic emission can draw a streak when source jumps");
+                Require(particles.main.simulationSpace==ParticleSystemSimulationSpace.Custom,
+                    "Snow dust cannot follow floating origin independently of cars");
+                var pose=poseObject.transform;
+                foreach(float angle in new[]{0f,75f,180f}) foreach(float reverse in new[]{-1f,1f})
+                {
+                    pose.rotation=Quaternion.Euler(0,angle,0);pose.position=new Vector3(100,3,-30);
+                    var direction=pose.forward*reverse;
+                    var localContact=new Vector3(.1f,-1.4f,.6f);
+                    var point=(Vector3)Call(trail,"EmissionPoint",pose,localContact,pose.up);
+                    Require(Vector3.Distance(point,pose.TransformPoint(localContact)+pose.up*.1f)<.00001f,"Snow source is not just above the rail contact");
+                }
+                particles.Emit(new ParticleSystem.EmitParams{position=new Vector3(2,3,4),velocity=Vector3.zero},1);
+                var buffer=new ParticleSystem.Particle[4];particles.GetParticles(buffer);var before=buffer[0].position;
+                ((GameObject)Get(trail,"owner")).transform.position=new Vector3(1000,0,-500);
+                particles.GetParticles(buffer);
+                Require(buffer[0].position==before,"Origin shift modified stable dust coordinates");
+                VerifyWheelDust(trail,particles);
+                VerifySnowEnvironment(trail,particles);
+                var flow=particles.velocityOverLifetime;
+                Set(trail,"wind",new Vector3(8,0,-3));Call(trail,"UpdateAirflow");
+                Require(flow.enabled && Mathf.Abs(flow.x.constant-4.4f)<.001f,"Wind does not advect existing airborne snow");
+                Require(particles.main.gravityModifier.constant>0 && particles.limitVelocityOverLifetime.drag.constant>0,"Snow never settles or slows");
+                Require(particles.main.maxParticles<=1800,"Snow particle budget grew unexpectedly");
+                Require(Mathf.Abs((float)Call(trail,"SampleTrailSize",25f)-.325f)<.001f,"Low-speed particle size not reduced");
+                Require(Mathf.Abs((float)Call(trail,"SampleTrailSize",100f)-1.1f)<.001f,"High-speed particle size did not grow");
+                Require(Mathf.Abs((float)Call(trail,"SampleTrailSize",180f)-1.1f)<.001f,"High-speed particle size has no cap");
+                Require(particles.main.startLifetime.constantMin>=3 && particles.main.startLifetime.constantMax>=5,
+                    "Main snow particles still have the short lifetime");
+                Require(particles.sizeOverLifetime.size.Evaluate(1) / particles.sizeOverLifetime.size.Evaluate(0)>3,
+                    "Cloud expansion did not increase");
+                SnowPlumePreview.Verify(particles,Path.GetFullPath(Path.Combine(modPath,"../../..")),(float)Call(trail,"SampleTrailSize",60f));
+                Require((float)Call(trail,"EmissionRate",24f/3.6f,1f)==0,"Main trail appeared below 25 km/h");
+                Require((float)Call(trail,"EmissionRate",26f/3.6f,1f)>0,"Main trail missing above 25 km/h");
+                Require((float)Call(trail,"EmissionRate",26f/3.6f,0f)==0,"Snow-free season emits dust");
+                Debug.Log("Snow dust verified: 25% of previous trail size, no distance streaks, one rail-height source forward/reverse/turn, stable origin.");
             }
             finally
             {
-                DestroyRuntimeObjects(trail, "owner", "material", "texture");
-                ((IDisposable)trail).Dispose();
+                DestroyRuntimeObjects(trail,"owner","material","snowTexture");((IDisposable)trail).Dispose();
+                UnityEngine.Object.DestroyImmediate(nativeObject);UnityEngine.Object.DestroyImmediate(nativeMaterial);
+                UnityEngine.Object.DestroyImmediate(nativeTexture);
+                UnityEngine.Object.DestroyImmediate(poseObject);
+                ((IDisposable)repository).Dispose();
             }
+        }
+
+        private static void VerifyWheelDust(object trail,ParticleSystem particles)
+        {
+            var cameraObject=new GameObject("wheel dust camera");cameraObject.tag="MainCamera";
+            var camera=cameraObject.AddComponent<Camera>();camera.transform.position=new Vector3(0,2,-3);
+            var roof=GameObject.CreatePrimitive(PrimitiveType.Cube);roof.layer=0;
+            roof.transform.position=new Vector3(20,2,0);roof.transform.localScale=new Vector3(5,.2f,5);
+            try
+            {
+                Physics.SyncTransforms();particles.Clear();Set(trail,"coverage",1f);Set(trail,"light",1f);
+                Set(trail,"wheelBudget",64);
+                Vector2 remaining=Vector2.one;
+                Action<int,Vector3,Vector3> wheel=(id,p,v)=>Call(trail,"WheelAt",id,p,Vector3.right,Vector3.up,v,remaining);
+                wheel(1,Vector3.zero,Vector3.forward*2);Require(particles.particleCount==0,"Spawn emitted wheel dust");
+                wheel(1,Vector3.forward,Vector3.forward*2);
+                var wheelState=((System.Collections.IDictionary)Get(trail,"wheels"))[1];
+                Require(particles.particleCount==4,"Low-speed snowy rail emitted no dust: count="+particles.particleCount+
+                    ", tracked="+(wheelState!=null)+
+                    ", camera="+(Camera.main!=null ? Camera.main.name : "none"));
+                var buffer=new ParticleSystem.Particle[8];particles.GetParticles(buffer);
+                bool left=false,right=false;foreach(var p in buffer)
+                {left|=p.position.x<-.7f;right|=p.position.x>.7f;}
+                Require(left && right,"Wheel dust missed one rail");
+                particles.Clear();wheel(1,Vector3.forward,Vector3.zero);
+                Require(particles.particleCount==0,"Stationary wheel emitted dust");
+                wheel(1,Vector3.forward*30,Vector3.forward*2);
+                Require(particles.particleCount==0,"Teleport emitted dust");
+                wheel(2,Vector3.right*20,Vector3.forward*2);wheel(2,Vector3.right*20+Vector3.forward,Vector3.forward*2);
+                Require(particles.particleCount==0,"Sheltered depot rails emitted snow");
+                Set(trail,"coverage",0f);wheel(3,Vector3.zero,Vector3.forward*2);wheel(3,Vector3.forward,Vector3.forward*2);
+                Require(particles.particleCount==0,"Snow-free rails emitted snow");
+                Set(trail,"coverage",1f);wheel(4,Vector3.forward*2,Vector3.back*2);wheel(4,Vector3.forward,Vector3.back*2);
+                Require(particles.particleCount>0,"Reverse wheel movement emitted no snow");
+                particles.Clear();remaining=new Vector2(0,1);
+                wheel(5,Vector3.zero,Vector3.forward*2);wheel(5,Vector3.forward,Vector3.forward*2);
+                Require(particles.particleCount==2,"Cleared left rail emitted snow or snowy right rail failed");
+                int actual=particles.GetParticles(buffer);for(int i=0;i<actual;i++)Require(buffer[i].position.x>.7f,"Cleared rail emitted snow");
+                particles.Clear();remaining=Vector2.zero;
+                wheel(5,Vector3.forward*2,Vector3.forward*2);Require(particles.particleCount==0,"Following axle emitted from cleared rails");
+                // Keep physical queries bounded even when many axles request
+                // shelter checks at once; oldest queued requests must progress.
+                particles.Clear();remaining=Vector2.one;
+                var tracked=(System.Collections.IDictionary)Get(trail,"wheels");
+                Set(trail,"wheelShelterBudget",16);
+                for(int id=100;id<140;id++){wheel(id,Vector3.zero,Vector3.forward*2);wheel(id,Vector3.forward,Vector3.forward*2);}
+                var pending=Get(trail,"wheelShelterQueries");
+                Require((int)pending.GetType().GetProperty("Count").GetValue(pending,null)>0,"Shelter query budget did not queue work");
+                for(int frame=0;frame<6;frame++)
+                {Set(trail,"wheelShelterBudget",16);Call(trail,"ProcessShelterQueries",Vector3.zero);}
+                for(int id=100;id<140;id++)
+                {var ready=(bool[])Get(tracked[id],"ShelterReady");Require(ready[0] && ready[1],"Tail axle starved in shelter query queue");}
+                Require((int)pending.GetType().GetProperty("Count").GetValue(pending,null)==0,"Shelter queue did not drain");
+                Debug.Log("WHEEL_SNOW_OK: both rails, low speed and reverse; no stationary, spawn, teleport, roof or snow-free emissions; native dust alpha preserved.");
+            }
+            finally{UnityEngine.Object.DestroyImmediate(cameraObject);UnityEngine.Object.DestroyImmediate(roof);}
+        }
+
+        private static void VerifySnowEnvironment(object trail,ParticleSystem particles)
+        {
+            var ground=GameObject.CreatePrimitive(PrimitiveType.Cube);ground.layer=0;
+            ground.transform.position=new Vector3(40,-.2f,0);ground.transform.localScale=new Vector3(6,.4f,6);
+            var roof=GameObject.CreatePrimitive(PrimitiveType.Cube);roof.layer=0;
+            roof.transform.position=new Vector3(40,2,0);roof.transform.localScale=new Vector3(6,.2f,6);roof.SetActive(false);
+            try
+            {
+                Physics.SyncTransforms();
+                Func<Vector3,float,float> sample=(p,amount)=>(float)Call(trail,"SampleSurfaceSnow",p,Vector3.right,Vector3.up,amount,Vector3.zero);
+                Require(sample(new Vector3(40,0,0),1)>.95f,"Snowy ballast cannot feed the main plume");
+                Require(sample(new Vector3(40,0,0),0)==0,"Bare ballast feeds snow plume");
+                Require(sample(new Vector3(40,4,0),1)==0,"Unsupported space above rail feeds plume");
+                roof.SetActive(true);Physics.SyncTransforms();
+                Require(sample(new Vector3(40,0,0),1)==0,"Covered depot feeds main snow plume");
+                Debug.Log("SNOW_ENVIRONMENT_OK: snowy ballast, bare ballast, missing support and roof checks; wind, drag and settling verified.");
+            }
+            finally{UnityEngine.Object.DestroyImmediate(ground);UnityEngine.Object.DestroyImmediate(roof);}
+        }
+
+        private static void VerifyAxleContactHeights(Assembly mod)
+        {
+            var type=mod.GetType("DVSeasons.Mod.RailSnowGameSource",true);
+            var contact=type.GetMethod("ContactPoint",All);
+            var bogie=new GameObject("S282 bogie fixture");
+            var axle=new GameObject("S282 axle fixture");axle.transform.SetParent(bogie.transform,false);
+            var tracks=Activator.CreateInstance(mod.GetType("DVSeasons.Mod.RailSnowTracks",true),true);
+            try
+            {
+                // Actual LocoS282A prefab heights/offsets: leading, powered,
+                // trailing axle. All share a rail plane despite different radii.
+                var offsets=new[]{new Vector3(-.0000858f,.35361266f,2.54748249f),
+                    new Vector3(0,.71212983f,.0058775f),new Vector3(0,.57801986f,-2.52498198f)};
+                foreach(var shift in new[]{Vector3.zero,new Vector3(1000,120,-500)})
+                foreach(var slope in new[]{Quaternion.identity,Quaternion.Euler(9,127,7)})
+                foreach(var position in offsets)foreach(float spin in new[]{0f,83f,241f})
+                {
+                    bogie.transform.SetPositionAndRotation(shift,slope);
+                    axle.transform.localPosition=position;axle.transform.localRotation=Quaternion.Euler(spin,0,0);
+                    var expected=bogie.transform.TransformPoint(new Vector3(position.x,0,position.z));
+                    var actual=(Vector3)contact.Invoke(null,new object[]{axle.transform,bogie.transform});
+                    Require(Vector3.Distance(actual,expected)<.0002f,"Small S282 wheel contact fell below the rail on slope/spin/origin shift");
+                }
+                bogie.transform.SetPositionAndRotation(Vector3.zero,Quaternion.identity);
+                axle.transform.localPosition=offsets[0];
+                var first=(Vector3)contact.Invoke(null,new object[]{axle.transform,bogie.transform});
+                Call(tracks,"WheelAt",1,first,Vector3.right,Vector3.forward);
+                bogie.transform.position=Vector3.forward;
+                var next=(Vector3)contact.Invoke(null,new object[]{axle.transform,bogie.transform});
+                Call(tracks,"WheelAt",1,next,Vector3.right,Vector3.forward);
+                float remaining=(float)Call(tracks,"RemainingAt",(first+next)*.5f+Vector3.right*.75f);
+                Require(remaining<.01f,"Leading axle did not clear the visible rail for following wheels");
+                Debug.Log("S282_AXLE_CONTACT_OK: actual leading/powered/trailing heights, slopes, spinning wheels, origin shift and rail clearing.");
+            }
+            finally{((IDisposable)tracks).Dispose();UnityEngine.Object.DestroyImmediate(bogie);}
+        }
+
+        private static void VerifyRailContacts(Assembly mod)
+        {
+            var type=mod.GetType("DVSeasons.Mod.RailSnowTracks",true);
+            var tracks=Activator.CreateInstance(type,true);
+            try
+            {
+                Action<int,Vector3> stamp=(id,p)=>Call(tracks,"WheelAt",id,p,Vector3.right,Vector3.forward);
+                Func<Vector3,float> remaining=p=>(float)Call(tracks,"RemainingAt",p);
+                Require(remaining(new Vector3(.75f,0,3))==1,"Fresh rail is clear");
+                stamp(1,Vector3.zero);stamp(1,Vector3.forward*5);
+                Require(remaining(new Vector3(.75f,0,3))<.01f && remaining(new Vector3(-.75f,0,3))<.01f,"Extended track missing from index");
+                Require(remaining(new Vector3(.75f,1,3))==1 && remaining(new Vector3(.75f,0,6))==1,"Track clears another height or untouched rail");
+                stamp(2,new Vector3(1.5f,0,0));stamp(2,new Vector3(1.5f,0,5));
+                Require(remaining(new Vector3(2.25f,0,3))<.01f,"Independent adjacent rail missed");
+                var records=Activator.CreateInstance(typeof(System.Collections.Generic.List<>).MakeGenericType(mod.GetType("DVSeasons.Mod.RailSnowStamp",true)));
+                Call(tracks,"Save",records);Call(tracks,"Restore",records);
+                Require(remaining(new Vector3(.75f,0,3))<.01f,"Restored clear rails emit snow");
+                Call(tracks,"Advance",1f,90f);
+                Require(Mathf.Abs(remaining(new Vector3(.75f,0,3))-.5f)<.001f,"Snowfall does not refill cleared tracks");
+                Set(tracks,"WorldOffset",new Vector3(1000,0,-500));
+                Require(Mathf.Abs(remaining(new Vector3(1000.75f,0,-497))-.5f)<.001f,"Origin shift moved rail history");
+                var pattern=mod.GetType("DVSeasons.Mod.SnowCoveragePattern",true);
+                var sample=pattern.GetMethod("At",All);
+                var texture=(Texture2D)pattern.GetMethod("CreateTexture",All).Invoke(null,null);
+                Require(texture!=null,"Shared snow noise unavailable");UnityEngine.Object.DestroyImmediate(texture);
+                bool snowy=false,bare=false;
+                for(int z=0;z<100;z++)
+                {
+                    float cover=(float)sample.Invoke(null,new object[]{new Vector3(.75f,0,z),.4f});
+                    snowy|=cover>.8f;bare|=cover<.01f;
+                }
+                Require(snowy && bare,"Partial snow does not distinguish bare rail patches");
+                Debug.Log("RAIL_CONTACT_SNOW_OK: cleared/untouched rails, two sides, vertical separation, extending ribbons, save/restore, snowfall refill, origin shift, partial coverage.");
+            }
+            finally{((IDisposable)tracks).Dispose();}
         }
 
         private static void VerifyAttachment(object controller, Transform anchor)

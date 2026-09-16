@@ -64,6 +64,7 @@ namespace UnityEngine
 
 namespace UnityModManagerNet
 {
+    public sealed class KeyBinding { }
     public static class UnityModManager
     {
         public sealed class ModEntry
@@ -119,6 +120,17 @@ namespace DVSeasons.Mod
     }
     internal sealed class WeatherAdapter : IDisposable
     {
+        public static WeatherAdapter LastCreated;
+        public Func<bool> WeatherAuthority;
+        public Action WeatherEdited;
+        public Action NetworkWeatherRestored;
+        private WeatherNetworkState networkWeather;
+        public WeatherNetworkState NetworkWeather => WeatherAuthority != null && !WeatherAuthority() ? networkWeather : null;
+        public WeatherNetworkState OutgoingWeather = new WeatherNetworkState();
+        public int NetworkReceiveCount, NetworkApplyCount;
+        public bool LastNetworkApplyForced;
+        public WeatherNetworkState LastAppliedNetworkWeather;
+        public WeatherAdapter() { LastCreated = this; }
         public SeasonState WithAirTemperature(SeasonState state) { return state; }
         public static DateTime? Clock;
         public static int AdhesionApplyCount;
@@ -127,6 +139,8 @@ namespace DVSeasons.Mod
         public static SeasonState LastThunderState;
         public static SeasonState LastClimateState;
         public static int SeasonResetCount, SeasonRefreshCount;
+        public static bool LastAdhesionEnabled, LastRespectWetness, LastThunderEnabled;
+        public static bool LastDaylightEnabled, LastPrecipitationEnabled;
         public static float DayMinutes = 60;
         public static bool WetnessOverridden, ThunderOverridden, DayOverridden;
         public bool IsReady { get { return Clock.HasValue; } }
@@ -135,7 +149,33 @@ namespace DVSeasons.Mod
         public float SnowLightFactor { get { return 1f; } }
         public void TickProbe() { }
         public bool TryGetGameDateTime(out DateTime time) { time = Clock.GetValueOrDefault(); return Clock.HasValue; }
-        public void ResetForSession() { }
+        public void ResetForSession() { networkWeather = null; LastAppliedNetworkWeather = null; }
+        public void ReceiveNetworkWeather(WeatherNetworkState state)
+        {
+            NetworkReceiveCount++;
+            if (WeatherAuthority != null && !WeatherAuthority() && state != null && state.Available && state.IsValid())
+                networkWeather = state.Clone();
+        }
+        public void ApplyNetworkWeather(bool force = false)
+        {
+            if (NetworkWeather == null || !IsReady) return;
+            NetworkApplyCount++;
+            LastNetworkApplyForced = force;
+            LastAppliedNetworkWeather = NetworkWeather.Clone();
+        }
+        public WeatherNetworkState CaptureNetworkWeather(SeasonModSettings settings)
+        {
+            if (!IsReady) return new WeatherNetworkState();
+            var snapshot = OutgoingWeather.Clone();
+            snapshot.Available = true;
+            snapshot.RealDateTimeTicks = Clock.Value.Ticks;
+            snapshot.SeasonalDaylight = settings.SeasonalDaylightEnabled;
+            snapshot.SeasonalPrecipitation = settings.SeasonalPrecipitationEnabled;
+            snapshot.WinterAdhesion = settings.WinterAdhesionEnabled;
+            snapshot.DisableWinterThunder = settings.DisableWinterThunder;
+            snapshot.RespectExternalWetnessOverride = settings.RespectExternalWetnessOverride;
+            return snapshot;
+        }
         public static void ResetAppliedOverrides()
         {
             AdhesionApplyCount = 0;
@@ -149,9 +189,12 @@ namespace DVSeasons.Mod
         {
             AdhesionApplyCount++;
             LastAdhesionState = state;
+            LastAdhesionEnabled = enabled;
+            LastRespectWetness = respectOtherMods;
         }
-        public void ApplySeasonalPrecipitation(SeasonState state, bool enabled) { }
-        public void ApplySeasonalClimate(SeasonState state, bool daylight, bool weather) { LastClimateState = state; }
+        public void ApplySeasonalPrecipitation(SeasonState state, bool enabled) { LastPrecipitationEnabled = enabled; }
+        public void ApplySeasonalClimate(SeasonState state, bool daylight, bool weather)
+        { LastClimateState = state; LastDaylightEnabled = daylight; }
         public void ResetSeasonEffects()
         {
             SeasonResetCount++;
@@ -162,6 +205,7 @@ namespace DVSeasons.Mod
         {
             ThunderApplyCount++;
             LastThunderState = state;
+            LastThunderEnabled = enabled;
         }
         public void Dispose() { }
     }
@@ -174,11 +218,13 @@ namespace DVSeasons.Mod
 
     internal sealed class CabHeaterService : IDisposable
     {
+        public bool EngineHeatingWithoutSwitch;
+        public float OutsideTemperature, SnowCoverage;
         public CabHeaterService(DVSeasons.Core.ISeasonNetworkBridge bridge) { }
         public void StartSession(SaveGameData data) { }
         public void EndSession() { }
         public void Save(SaveGameData data) { }
-        public void Tick() { }
+        public void Tick(UnityModManagerNet.KeyBinding shortcut) { }
         public void Dispose() { }
     }
     internal sealed class SeasonVisualController : IDisposable

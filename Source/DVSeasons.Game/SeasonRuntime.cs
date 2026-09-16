@@ -41,6 +41,7 @@ namespace DVSeasons.Mod
         private uint seasonSelectionRevision;
         private bool pendingNetworkVisualReset;
         private float? networkSurfaceSnowCoverage;
+        private WeatherNetworkState lastNetworkWeather;
 
         public SeasonRuntime(UnityModManager.ModEntry entry, SeasonModSettings settings,
             ISeasonNetworkBridge networkBridge = null)
@@ -55,6 +56,9 @@ namespace DVSeasons.Mod
             currentState = weather.WithAirTemperature(cycle.GetState());
             localCalendar = CaptureCalendar();
             network = networkBridge ?? CreateNetworkBridge(entry.Path);
+            weather.WeatherAuthority = HasLocalAuthority;
+            weather.WeatherEdited = OnWeatherMenuEdited;
+            weather.NetworkWeatherRestored = ApplyOwnedWeatherOverrides;
             network.StateReceived += OnNetworkStateReceived;
             network.Initialize(entry.Info.Id);
             cabHeaters = new CabHeaterService(network);
@@ -129,14 +133,18 @@ namespace DVSeasons.Mod
         public void Tick(float deltaTime)
         {
             if (!started || disposed || !sessionReady) return;
-            cabHeaters.Tick();
             if (UnloadWatcher.isUnloading || saveManager == null)
             {
                 OnWorldUnloading();
                 return;
             }
             settings.Clamp();
+            cabHeaters.EngineHeatingWithoutSwitch = settings.EngineHeatingWithoutSwitch;
+            cabHeaters.OutsideTemperature = currentState.TemperatureCelsius;
+            cabHeaters.SnowCoverage = currentState.SnowAmount;
+            cabHeaters.Tick(settings.CabHeaterHotkey);
             weather.TickProbe();
+            bool publishImmediately = false;
             if (HasLocalAuthority())
             {
                 var transitionSelectionChanged = EnsureTransitionDuration(cycle.Phase);
@@ -151,7 +159,7 @@ namespace DVSeasons.Mod
                 // A new random 1-5 day selection is authoritative configuration,
                 // not merely visual state. Send it immediately instead of waiting
                 // for the next periodic weather/season broadcast.
-                network.Publish(CreateNetworkState(currentState), transitionSelectionChanged);
+                publishImmediately = transitionSelectionChanged;
                 if (UnityEngine.Time.realtimeSinceStartup >= nextSettingsCheckpoint)
                 {
                     nextSettingsCheckpoint = UnityEngine.Time.realtimeSinceStartup + SettingsCheckpointSeconds;
@@ -173,6 +181,7 @@ namespace DVSeasons.Mod
                 pendingNetworkVisualReset = false;
             }
             ApplySeasonWeather(resetNetworkEffects);
+            if (HasLocalAuthority()) network.Publish(CreateNetworkState(currentState), publishImmediately);
             thermal.Apply(currentState.TemperatureCelsius, HasLocalAuthority());
             var useHostWeather = network.IsSessionActive && !network.IsAuthority && receivedNetworkState;
             var rainIntensity = useHostWeather ? networkRainIntensity : weather.RainIntensity;
@@ -284,9 +293,17 @@ namespace DVSeasons.Mod
 
         private void ApplyOwnedWeatherOverrides()
         {
-            weather.ApplyWinterAdhesion(currentState, settings.WinterAdhesionEnabled,
-                settings.RespectExternalWetnessOverride);
-            weather.ApplyWinterThunderSuppression(currentState, settings.DisableWinterThunder);
+            var host = weather.NetworkWeather;
+            weather.ApplyWinterAdhesion(currentState, host != null ? host.WinterAdhesion : settings.WinterAdhesionEnabled,
+                host != null ? host.RespectExternalWetnessOverride : settings.RespectExternalWetnessOverride);
+            weather.ApplyWinterThunderSuppression(currentState, host != null ? host.DisableWinterThunder : settings.DisableWinterThunder);
+        }
+
+        private void OnWeatherMenuEdited()
+        {
+            if (!started || disposed || !sessionReady || !HasLocalAuthority()) return;
+            currentState = weather.WithAirTemperature(cycle.GetState());
+            network.Publish(CreateNetworkState(currentState), true);
         }
 
         private void ApplySeasonWeather(bool forceReset = false)
@@ -304,9 +321,12 @@ namespace DVSeasons.Mod
             {
                 weather.ResetSeasonEffects();
             }
-            weather.ApplySeasonalPrecipitation(currentState, settings.SeasonalPrecipitationEnabled);
-            weather.ApplySeasonalClimate(currentState, settings.SeasonalDaylightEnabled,
-                settings.SeasonalPrecipitationEnabled);
+            weather.ApplyNetworkWeather(changed);
+            var host = weather.NetworkWeather;
+            bool precipitation = host != null ? host.SeasonalPrecipitation : settings.SeasonalPrecipitationEnabled;
+            weather.ApplySeasonalPrecipitation(currentState, precipitation);
+            weather.ApplySeasonalClimate(currentState, host != null ? host.SeasonalDaylight : settings.SeasonalDaylightEnabled,
+                precipitation);
             if (changed) weather.RefreshSeasonWeather();
             ApplyOwnedWeatherOverrides();
             appliedWeatherSeason = currentState.Current;
@@ -372,6 +392,8 @@ namespace DVSeasons.Mod
 
             visuals.ResetForSession();
             weather.ResetForSession();
+            // A host packet may arrive while the client's world is still loading.
+            if (receivedNetworkState) weather.ReceiveNetworkWeather(lastNetworkWeather);
             thermal.Reset();
             appliedWeatherSeason = null;
             rainAudio.Apply(0f, false, false);
@@ -433,6 +455,7 @@ namespace DVSeasons.Mod
                 gameClock.Reset();
                 nextSettingsCheckpoint = UnityEngine.Time.realtimeSinceStartup + SettingsCheckpointSeconds;
                 weather.TickProbe();
+                if (HasLocalAuthority() || receivedNetworkState) ApplySeasonWeather();
                 if (HasLocalAuthority()) network.Publish(CreateNetworkState(currentState), true);
                 else network.RequestState();
             }
@@ -482,6 +505,7 @@ namespace DVSeasons.Mod
             sessionSaveData = null;
             sessionReady = false;
             receivedNetworkState = false;
+            lastNetworkWeather = null;
             lastNetworkSelection = null;
             pendingNetworkVisualReset = false;
             if (sessionWasClient) RestoreCalendar(localCalendar);
@@ -560,6 +584,8 @@ namespace DVSeasons.Mod
             networkWindVelocityZ = state.WindVelocityZ;
             networkSnowLightFactor = state.SnowLightFactor;
             networkSurfaceSnowCoverage = state.HasSurfaceSnowCoverage ? (float?)state.SurfaceSnowCoverage : null;
+            lastNetworkWeather = state.Weather?.Clone();
+            weather.ReceiveNetworkWeather(lastNetworkWeather);
             var incoming = SeasonState.FromNetwork(state);
             if (!lastNetworkSelection.HasValue || lastNetworkSelection.Value != state.SeasonSelectionRevision)
                 pendingNetworkVisualReset = true;
@@ -578,6 +604,7 @@ namespace DVSeasons.Mod
             var snow = visuals.SurfaceSnowCoverage;
             packet.HasSurfaceSnowCoverage = snow.HasValue;
             packet.SurfaceSnowCoverage = snow.GetValueOrDefault();
+            packet.Weather = weather.CaptureNetworkWeather(settings);
             return packet;
         }
 

@@ -47,12 +47,53 @@ namespace DVSeasons.Mod
                     prefix: new HarmonyMethod(typeof(SeasonalWeatherIsolation), nameof(BeginSnapshot)),
                     finalizer: new HarmonyMethod(typeof(SeasonalWeatherIsolation), nameof(EndSnapshot)));
                 installed = true;
+                var provider = typeof(DV.UI.LocoHUD.PhotoModeWeatherSettingsProvider);
+                harmony.Patch(AccessTools.Method(provider, "SetWeatherOverride"),
+                    prefix: new HarmonyMethod(typeof(SeasonalWeatherIsolation), nameof(ManualSet)),
+                    postfix: new HarmonyMethod(typeof(SeasonalWeatherIsolation), nameof(MenuChanged)));
+                harmony.Patch(AccessTools.Method(provider, "ClearWeatherOverride"),
+                    prefix: new HarmonyMethod(typeof(SeasonalWeatherIsolation), nameof(ManualClear)),
+                    postfix: new HarmonyMethod(typeof(SeasonalWeatherIsolation), nameof(MenuChanged)));
+                harmony.Patch(AccessTools.Method(provider, "SetTime"),
+                    prefix: new HarmonyMethod(typeof(SeasonalWeatherIsolation), nameof(CanEdit)),
+                    postfix: new HarmonyMethod(typeof(SeasonalWeatherIsolation), nameof(TimeChanged)));
+                harmony.Patch(AccessTools.Method(provider, "IsSliderInteractable"),
+                    prefix: new HarmonyMethod(typeof(SeasonalWeatherIsolation), nameof(SliderInteractable)));
+                harmony.Patch(AccessTools.Method(typeof(WeatherDriver), "LoadSaveData"),
+                    postfix: new HarmonyMethod(typeof(SeasonalWeatherIsolation), nameof(WeatherLoaded)));
             }
             catch { Dispose(); throw; }
         }
 
         private static void BeginDrying(WeatherDriver __instance, out SuspendedValue __state)
         { __state = active == null ? null : active.SuspendWetness(__instance); }
+
+        private static bool CanEdit() { return active == null || active.CanEditWeather; }
+
+        private static bool ManualSet(DV.UI.LocoHUD.PhotoModeWeatherController.WeatherSettingType __0)
+        {
+            if (!CanEdit()) return false;
+            if (__0 == DV.UI.LocoHUD.PhotoModeWeatherController.WeatherSettingType.WetnessValue) active?.ManualWetness(true);
+            if (__0 == DV.UI.LocoHUD.PhotoModeWeatherController.WeatherSettingType.ThunderValue) active?.ManualThunder(true);
+            return true;
+        }
+        private static bool ManualClear(DV.UI.LocoHUD.PhotoModeWeatherController.WeatherSettingType __0)
+        {
+            if (!CanEdit()) return false;
+            if (__0 == DV.UI.LocoHUD.PhotoModeWeatherController.WeatherSettingType.WetnessValue) active?.ManualWetness(false);
+            if (__0 == DV.UI.LocoHUD.PhotoModeWeatherController.WeatherSettingType.ThunderValue) active?.ManualThunder(false);
+            return true;
+        }
+
+        private static void MenuChanged() { if (CanEdit()) active?.MenuWeatherChanged(false); }
+        private static void TimeChanged() { if (CanEdit()) active?.MenuWeatherChanged(true); }
+        private static bool SliderInteractable(ref bool __result)
+        {
+            if (CanEdit()) return true;
+            __result = false;
+            return false;
+        }
+        private static void WeatherLoaded(WeatherDriver __instance) { active?.NativeWeatherLoaded(__instance); }
 
         private static void EndDrying(SuspendedValue __state) { __state?.Restore(); }
 

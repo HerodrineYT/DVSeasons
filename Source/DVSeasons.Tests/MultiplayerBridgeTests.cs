@@ -245,6 +245,36 @@ namespace DVSeasons.Tests
             }
         }
         [Fact]
+        public void WeatherIsCopiedForLateJoinersAndClearedMasksReachExistingClients()
+        {
+            using (var host = new Server())
+            {
+                var state = Winter();
+                state.Weather = new WeatherNetworkState
+                {
+                    Available = true, Overrides = 1, Values = new[] { .8f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f },
+                    RealDateTimeTicks = new DateTime(2026, 9, 16).Ticks,
+                    TimeRevision = 3, SeasonalPrecipitation = true
+                };
+                host.Publish(state);
+                state.Weather.Values[0] = .2f;
+                state.Weather.Overrides = 0;
+                var first = host.AddClient();
+                var received = first.Seasons[first.Seasons.Count - 1].Weather;
+                Assert.Equal(.8f, received.Values[0]);
+                Assert.Equal((ushort)1, received.Overrides);
+                Assert.Equal(3u, received.TimeRevision);
+                Assert.True(received.SeasonalPrecipitation);
+                received.Values[0] = .4f;
+                var second = host.AddClient();
+                Assert.Equal(.8f, second.Seasons[second.Seasons.Count - 1].Weather.Values[0]);
+                host.Publish(state);
+                foreach (var client in host.Clients)
+                    Assert.Equal((ushort)0, client.Seasons[client.Seasons.Count - 1].Weather.Overrides);
+            }
+        }
+
+        [Fact]
         public void ServerHooksAreRemovedOnStopAndDispose()
         {
             using (var host = new Server())

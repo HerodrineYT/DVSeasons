@@ -114,6 +114,19 @@ namespace DVSeasons.Mod
             GUILayout.Label(ModLocalization.Text("Settings.NewSnowHelp"));
             settings.WinterWindowsEnabled = GUILayout.Toggle(settings.WinterWindowsEnabled,
                 ModLocalization.Text("Settings.WinterWindows"));
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(ModLocalization.Text("Settings.HeaterKey"));
+            UnityModManager.UI.DrawKeybindingSmart(settings.CabHeaterHotkey,
+                ModLocalization.Text("Settings.HeaterKey"), key => { settings.CabHeaterHotkey = key; settings.Save(entry); });
+            if (GUILayout.Button(ModLocalization.Text("Settings.ClearHeaterKey")))
+            { settings.CabHeaterHotkey = new KeyBinding(); settings.Save(entry); }
+            GUILayout.EndHorizontal();
+            GUILayout.Label(ModLocalization.Text("Settings.HeaterKeyHelp"));
+            settings.EngineHeatingWithoutSwitch = GUILayout.Toggle(settings.EngineHeatingWithoutSwitch,
+                ModLocalization.Text("Settings.EngineHeatingWithoutSwitch"));
+            GUILayout.Label(ModLocalization.Text("Settings.EngineHeatingWithoutSwitchHelp"));
+            settings.AutumnLeavesEnabled = GUILayout.Toggle(settings.AutumnLeavesEnabled,
+                ModLocalization.Text("Settings.AutumnLeaves"));
             GUILayout.Label(ModLocalization.Format("Settings.LeafLimit", settings.AutumnLeafLimit == 0
                 ? ModLocalization.Text("Settings.Unlimited") : settings.AutumnLeafLimit.ToString()));
             var leafSlider = Mathf.RoundToInt(GUILayout.HorizontalSlider(

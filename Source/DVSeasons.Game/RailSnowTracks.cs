@@ -15,6 +15,7 @@ namespace DVSeasons.Mod
             public readonly List<Vector3> Vertices = new List<Vector3>();
             public readonly List<Vector2> Uv = new List<Vector2>();
             public readonly List<int> Indices = new List<int>();
+            public readonly List<RailSnowContactIndex.Mark> Marks = new List<RailSnowContactIndex.Mark>();
             public bool Dirty;
             public bool TopologyDirty;
             public Chunk() { Mesh.MarkDynamic(); }
@@ -31,6 +32,8 @@ namespace DVSeasons.Mod
         }
         private readonly Dictionary<int,Wheel> previous = new Dictionary<int,Wheel>();
         private readonly List<Chunk> chunks = new List<Chunk>();
+        private readonly RailSnowContactIndex contacts = new RailSnowContactIndex();
+        public float RemainingAt(Vector3 worldPoint) => contacts.Remaining(worldPoint-WorldOffset,SnowClock);
         public float SnowClock { get; private set; }
         public Vector3 WorldOffset;
         public int SegmentCount { get; private set; }
@@ -101,6 +104,7 @@ namespace DVSeasons.Mod
                 {
                     var chunk=old.Chunks[i];int n=old.Ends[i];
                     chunk.Vertices[n]=end-width; chunk.Vertices[n+1]=end+width;chunk.Dirty=true;
+                    var mark=chunk.Marks[n/4];mark.B=end;contacts.Update(mark);
                 }
                 else Add(start+offset,end,width,old,i);
             }
@@ -115,12 +119,15 @@ namespace DVSeasons.Mod
                 if(chunks.Count>=128)
                 {
                     chunk=chunks[0]; chunks.RemoveAt(0); // reuse oldest allocation
+                    foreach(var mark in chunk.Marks)contacts.Remove(mark);chunk.Marks.Clear();
                     chunk.Vertices.Clear(); chunk.Uv.Clear(); chunk.Indices.Clear(); chunk.Mesh.Clear(); chunk.Generation++;
                 }
                 else chunk=new Chunk();
                 chunks.Add(chunk);
             }
             int n=chunk.Vertices.Count;
+            var contactMark=new RailSnowContactIndex.Mark {A=a,B=b,Width=width,Stamp=SnowClock};
+            chunk.Marks.Add(contactMark);contacts.Update(contactMark);
             wheel.Chunks[side]=chunk;wheel.Ends[side]=n+2;wheel.Generations[side]=chunk.Generation;
             chunk.Vertices.Add(a-width); chunk.Vertices.Add(a+width);
             chunk.Vertices.Add(b-width); chunk.Vertices.Add(b+width);
@@ -164,7 +171,7 @@ namespace DVSeasons.Mod
         {
             foreach(var c in chunks)
                 if(Application.isPlaying) UnityEngine.Object.Destroy(c.Mesh); else UnityEngine.Object.DestroyImmediate(c.Mesh);
-            chunks.Clear(); previous.Clear(); SnowClock=0; SegmentCount=0;
+            chunks.Clear(); previous.Clear(); contacts.Clear(); SnowClock=0; SegmentCount=0;
         }
     }
 }

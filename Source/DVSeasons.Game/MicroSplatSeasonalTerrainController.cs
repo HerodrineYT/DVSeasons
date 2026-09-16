@@ -115,7 +115,8 @@ namespace DVSeasons.Mod
             {
                 lastSeasonKey = seasonKey;
                 ApplyCoverage(coverageStep, settings.DistantTerrainSeasonal);
-                if(springStep==0) springTint.Dispose();
+                // Streamed material clones can still reference these outputs.
+                // Keep them alive until their originals have been restored.
             }
             else if (Time.realtimeSinceStartup >= nextReapplyTime)
             {
@@ -199,8 +200,8 @@ namespace DVSeasons.Mod
             {
                 var property = DiffuseProperties[propertyIndex];
                 if (!HasTextureProperty(material, property)) continue;
-                var observed = material.GetTexture(property) as Texture2DArray;
-                if (observed == null || observed.depth != WinterLayerOrder.Length) continue;
+                var observed = material.GetTexture(property);
+                if (!IsLandscapeArray(observed)) continue;
                 var key = material.GetInstanceID() + "|" + property;
                 Binding existing;
                 if (bindings.TryGetValue(key, out existing) && IsCurrentTextureBinding(existing))
@@ -208,7 +209,8 @@ namespace DVSeasons.Mod
                 Texture original;
                 if (IsSeasonalTerrainTexture(observed))
                 {
-                    if (!canonicalSummerArrays.TryGetValue(property, out original)) continue;
+                    original = OriginalFor(observed);
+                    if (original == null && !canonicalSummerArrays.TryGetValue(property, out original)) continue;
                 }
                 else
                 {
@@ -275,8 +277,8 @@ namespace DVSeasons.Mod
         {
             const string property = "_Splats";
             if (!HasTextureProperty(material, property)) return 0;
-            var observed = material.GetTexture(property) as Texture2DArray;
-            if (observed == null || observed.depth != WinterLayerOrder.Length) return 0;
+            var observed = material.GetTexture(property);
+            if (!IsLandscapeArray(observed)) return 0;
 
             var key = material.GetInstanceID() + "|" + property;
             Binding existing;
@@ -285,7 +287,8 @@ namespace DVSeasons.Mod
             Texture original;
             if (IsSeasonalTerrainTexture(observed))
             {
-                if (!canonicalSummerArrays.TryGetValue(property, out original)) return 0;
+                original = OriginalFor(observed);
+                if (original == null && !canonicalSummerArrays.TryGetValue(property, out original)) return 0;
             }
             else
             {
@@ -337,8 +340,8 @@ namespace DVSeasons.Mod
         private bool IsBuiltInMicroSplatMaterial(Material material)
         {
             if (!HasTextureProperty(material, "_Diffuse")) return false;
-            var diffuse = material.GetTexture("_Diffuse") as Texture2DArray;
-            if (diffuse == null || diffuse.depth != WinterLayerOrder.Length) return false;
+            var diffuse = material.GetTexture("_Diffuse");
+            if (!IsLandscapeArray(diffuse)) return false;
 
             var materialName = material.name ?? string.Empty;
             var shaderName = material.shader == null ? string.Empty : material.shader.name;
@@ -455,6 +458,23 @@ namespace DVSeasons.Mod
             if (!IsCurrentTextureBinding(binding) || target == null) return;
             if(binding.Material.GetTexture(binding.Property)!=target) binding.Material.SetTexture(binding.Property, target);
             binding.Applied = target;
+        }
+
+        private static bool IsLandscapeArray(Texture texture)
+        {
+            var array = texture as Texture2DArray;
+            var rt = texture as RenderTexture;
+            return array != null ? array.depth == 16 : rt != null &&
+                rt.dimension == TextureDimension.Tex2DArray && rt.volumeDepth == 16;
+        }
+
+        private Texture OriginalFor(Texture texture)
+        {
+            var original = springTint.OriginalFor(texture);
+            if (original != null) return original;
+            foreach (var entry in layeredArrays.Values)
+                if (entry.Output == texture) return entry.Clear;
+            return null;
         }
 
         private bool IsSeasonalTerrainTexture(Texture texture)
@@ -621,6 +641,9 @@ namespace DVSeasons.Mod
         private void Restore()
         {
             if(restored) return;
+            // Find clones created since the last scheduled scan before releasing
+            // their shared spring render textures (otherwise they become black).
+            Scan(true);
             restored=true;RestorePassCount++;
             foreach (var binding in bindings.Values)
             {

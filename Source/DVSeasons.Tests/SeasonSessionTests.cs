@@ -464,6 +464,130 @@ namespace DVSeasons.Tests
         }
 
         [Fact]
+        public void ClientUsesHostWeatherSettingsWithoutPersistingThemOverLocalPreferences()
+        {
+            var net = new TestNetwork { IsSessionActive = true, IsAuthority = false };
+            using (var session = new Session(1d, net))
+            {
+                session.Settings.SeasonalDaylightEnabled = true;
+                session.Settings.SeasonalPrecipitationEnabled = true;
+                session.Settings.WinterAdhesionEnabled = true;
+                session.Settings.DisableWinterThunder = true;
+                session.Settings.RespectExternalWetnessOverride = false;
+                session.Enter(new SaveGameData());
+                var state = HostWeather();
+                state.Weather.RespectExternalWetnessOverride = true;
+                net.Receive(state);
+                session.Runtime.Tick(.02f);
+                Assert.False(WeatherAdapter.LastDaylightEnabled);
+                Assert.False(WeatherAdapter.LastPrecipitationEnabled);
+                Assert.False(WeatherAdapter.LastAdhesionEnabled);
+                Assert.False(WeatherAdapter.LastThunderEnabled);
+                Assert.True(WeatherAdapter.LastRespectWetness);
+                session.Runtime.SaveSettings();
+                var saved = session.ReadCheckpoint();
+                Assert.True(saved.SeasonalDaylightEnabled);
+                Assert.True(saved.SeasonalPrecipitationEnabled);
+                Assert.True(saved.WinterAdhesionEnabled);
+                Assert.True(saved.DisableWinterThunder);
+                Assert.False(saved.RespectExternalWetnessOverride);
+                Assert.True(session.Settings.SeasonalDaylightEnabled);
+                Assert.False(session.Settings.RespectExternalWetnessOverride);
+            }
+        }
+
+        [Fact]
+        public void WeatherMenuEditForcesImmediateHostPublishAndClientsCannotPublish()
+        {
+            var net = new TestNetwork { IsSessionActive = true };
+            using (var session = new Session(3d, net))
+            {
+                session.Enter(new SaveGameData());
+                var adapter = WeatherAdapter.LastCreated;
+                adapter.OutgoingWeather.Overrides = 1;
+                adapter.OutgoingWeather.Values[0] = .85f;
+                int before = net.PublishCount;
+                adapter.WeatherEdited(); // No runtime tick or broadcast timer advance.
+                Assert.Equal(before + 1, net.PublishCount);
+                Assert.True(net.LastPublishForced);
+                Assert.Equal(.85f, net.LastPublished.Weather.Values[0]);
+                Assert.Equal((ushort)1, net.LastPublished.Weather.Overrides);
+                net.IsAuthority = false;
+                adapter.WeatherEdited();
+                Assert.Equal(before + 1, net.PublishCount);
+                session.Runtime.Stop();
+                adapter.WeatherEdited();
+                Assert.Equal(before + 1, net.PublishCount);
+            }
+        }
+
+        [Fact]
+        public void HostWeatherReceivedDuringLoadingSurvivesPreparationAndSeasonResets()
+        {
+            var net = new TestNetwork { IsSessionActive = true, IsAuthority = false };
+            using (var session = new Session(1d, net))
+            {
+                session.Runtime.Start();
+                var state = HostWeather();
+                state.SeasonSelectionRevision = 5;
+                var adapter = WeatherAdapter.LastCreated;
+                net.Receive(state);
+                Assert.Equal(1, adapter.NetworkReceiveCount);
+                Assert.Equal(0, adapter.NetworkApplyCount);
+                session.Prepare(new SaveGameData());
+                WorldStreamingInit.FinishLoading();
+                session.Runtime.Tick(.02f);
+                Assert.NotNull(adapter.LastAppliedNetworkWeather);
+                Assert.Equal(.8f, adapter.LastAppliedNetworkWeather.Values[0]);
+                int beforeReset = adapter.NetworkApplyCount;
+                state.SeasonSelectionRevision++;
+                net.Receive(state);
+                session.Runtime.Tick(.02f);
+                Assert.True(adapter.NetworkApplyCount > beforeReset);
+                Assert.True(adapter.LastNetworkApplyForced);
+                Assert.Equal((ushort)1, adapter.LastAppliedNetworkWeather.Overrides);
+                UnloadWatcher.RequestUnload();
+                Assert.Null(adapter.NetworkWeather);
+            }
+        }
+
+        [Fact]
+        public void NativeWeatherRestoreCallbackReappliesHostOwnedModifiers()
+        {
+            var net = new TestNetwork { IsSessionActive = true, IsAuthority = false };
+            using (var session = new Session(1d, net))
+            {
+                session.Enter(new SaveGameData());
+                var state = HostWeather();
+                state.Weather.WinterAdhesion = false;
+                state.Weather.DisableWinterThunder = false;
+                state.Weather.RespectExternalWetnessOverride = true;
+                net.Receive(state);
+                session.Runtime.Tick(.02f);
+                WeatherAdapter.ResetAppliedOverrides();
+                WeatherAdapter.LastCreated.NetworkWeatherRestored();
+                Assert.Equal(1, WeatherAdapter.AdhesionApplyCount);
+                Assert.Equal(1, WeatherAdapter.ThunderApplyCount);
+                Assert.False(WeatherAdapter.LastAdhesionEnabled);
+                Assert.False(WeatherAdapter.LastThunderEnabled);
+                Assert.True(WeatherAdapter.LastRespectWetness);
+            }
+        }
+
+        private static SeasonNetworkState HostWeather()
+        {
+            var state = SeasonNetworkState.FromState(new SeasonState(3d, SeasonKind.Winter,
+                SeasonKind.Spring, 0f, 1f, -20f, .4f), 14f, 3f);
+            state.Weather = new WeatherNetworkState
+            {
+                Available = true, Overrides = 1,
+                Values = new[] { .8f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f },
+                RealDateTimeTicks = new DateTime(2026, 1, 1).Ticks
+            };
+            return state;
+        }
+
+        [Fact]
         public void HostAloneRunsSeasonalPowertrainSimulation()
         {
             var net = new TestNetwork();
@@ -548,6 +672,8 @@ namespace DVSeasons.Tests
         private sealed class TestNetwork : ISeasonNetworkBridge
         {
             public SeasonNetworkState LastPublished;
+            public int PublishCount;
+            public bool LastPublishForced;
             public bool IsAvailable { get { return true; } }
             public bool IsSessionActive { get; set; }
             public bool IsAuthority { get; set; } = true;
@@ -556,7 +682,8 @@ namespace DVSeasons.Tests
             public void Receive(SeasonNetworkState state) { StateReceived?.Invoke(state); }
             public void Initialize(string id) { }
             public void SetEnabled(bool enabled) { }
-            public void Publish(SeasonNetworkState state, bool force) { LastPublished = state; }
+            public void Publish(SeasonNetworkState state, bool force)
+            { LastPublished = state; PublishCount++; LastPublishForced = force; }
             public void RequestState() { }
             public void Dispose() { }
         }

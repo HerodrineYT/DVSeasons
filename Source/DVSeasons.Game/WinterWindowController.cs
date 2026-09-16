@@ -24,7 +24,7 @@ namespace DVSeasons.Mod
         private sealed class Cab
         {
             public TrainCar Car;
-            public readonly WindowWinterClimate Climate = new WindowWinterClimate();
+            public WindowWinterClimate Climate = new WindowWinterClimate();
             public ControlImplBase Heater;
             public DoorsAndWindowsController[] Openings;
             public OpenableControl[] Openables;
@@ -62,10 +62,16 @@ namespace DVSeasons.Mod
             public bool[] WiperReady;
             public float NextShelter;
             public bool Sheltered;
+            public Matrix4x4 CollisionMatrix;
+            public Vector3 CollisionCentre;
+            public float NextProperties;
         }
         private readonly SeasonAssetBundleRepository repository;
         private readonly Dictionary<TrainCar, Cab> cabs = new Dictionary<TrainCar, Cab>();
         private readonly List<Pane> panes = new List<Pane>();
+        private readonly List<Pane> collisionPanes = new List<Pane>();
+        private Cab cameraCab;
+        private RenderTexture frostPattern;
         private readonly HashSet<Window> known = new HashSet<Window>();
         private readonly HashSet<MeshRenderer> boundVisuals = new HashSet<MeshRenderer>();
         private readonly List<TrainCar> removed = new List<TrainCar>();
@@ -129,6 +135,7 @@ namespace DVSeasons.Mod
         }
         public void Restore(List<CabFrostState> records)
         {
+            CabHeating.RestoreCustomClimates(records);
             savedClimates.Clear(); if(records==null) return;
             foreach(var record in records)
                 if(record!=null && !string.IsNullOrEmpty(record.Id) && record.Id.Length<=80 && record.Climate!=null && record.Climate.IsValid())
@@ -138,9 +145,11 @@ namespace DVSeasons.Mod
         {
             foreach(var cab in cabs.Values)
                 if(cab.Car!=null && !string.IsNullOrEmpty(cab.Car.CarGUID)) savedClimates[cab.Car.CarGUID]=cab.Climate.Capture();
+            CabHeating.SaveCustomClimates(savedClimates);
             foreach(var pair in savedClimates) destination.Add(new CabFrostState {Id=pair.Key,Climate=pair.Value});
         }
         private float nextScan, nextClimate, lastClimate;
+        private IEnumerator<int> discovery;
         private float snowfall, lighting;
         private Shader shader;
         private int cursor;
@@ -165,14 +174,16 @@ namespace DVSeasons.Mod
             if (camera == null) return;
             if (shader == null) shader = repository.LoadShader("WinterWindow");
             if (shader == null) return;
+            EnsureFrostPattern();
             active = this;
             snowfall = Mathf.Clamp01(snow); lighting = Mathf.Clamp01(light);
             float now = Time.time;
-            if (now >= nextScan)
+            if (discovery == null && now >= nextScan)
             {
-                nextScan = now + 1;
-                Discover(camera, now);
+                nextScan = now + 2;
+                discovery = Discover(camera, now).GetEnumerator();
             }
+            using (SnowPerformance.Measure("window-discovery")) FrameDiscovery.Advance(ref discovery);
             if (now >= nextClimate)
             {
                 float dt = lastClimate > 0 ? Mathf.Clamp(now - lastClimate, 0, 1) : .1f;
@@ -181,6 +192,10 @@ namespace DVSeasons.Mod
                 {
                     if (cab.Car == null) continue;
                     cab.AmbientTemperature = state.TemperatureCelsius;
+                    // Custom-car climate lives independently of this visual
+                    // controller and is also shared with Survival without panes.
+                    var sharedClimate = CabHeating.CustomClimate(cab.Car);
+                    if (sharedClimate != null) { cab.Climate = sharedClimate; continue; }
                     Bind(cab, now);
                     bool running = cab.EngineOn != null ? cab.EngineOn.Value > .5f
                         : cab.EngineRpm != null && cab.EngineRpm.Value > .05f;
@@ -188,7 +203,7 @@ namespace DVSeasons.Mod
                     if (sim != null && sim.firebox != null && sim.firebox.IsFireOn) running = true;
                     bool open = AnythingOpen(cab);
                     float heater = cab.Heater != null ? Mathf.Clamp01(cab.Heater.Value) : 0;
-                    if (CabHeating.IsActive && CabHeaterSwitchSystem.IsSupported(cab.Car))
+                    if (CabHeating.IsActive && (CabHeaterSwitchSystem.IsSupported(cab.Car) || CabEngineHeating.IsCustomLocomotive(cab.Car)))
                         heater = CabHeating.GetLevel(cab.Car);
                     // Steam's firebox warms the cab without a separate electrical heater.
                     if (sim != null && sim.firebox != null && sim.firebox.IsFireOn) heater = Math.Max(heater, .85f);
@@ -199,9 +214,20 @@ namespace DVSeasons.Mod
             }
             // Reuse the actual glass geometry and follow streamed/moving windows.
             // Never change the native droplet materials or their property blocks.
+            collisionPanes.Clear(); cameraCab = null;
+            float nearestCab = 25f;
             foreach (var pane in panes)
             {
                 if (pane.Frame == null) continue;
+                float distance = (pane.Frame.position-camera.transform.position).sqrMagnitude;
+                if (distance < 1600 && pane.Frame.gameObject.activeInHierarchy)
+                {
+                    pane.CollisionMatrix = MovingPaneMatrix(pane);
+                    pane.CollisionCentre = pane.Frame.position;
+                    collisionPanes.Add(pane);
+                    if (pane.Window != null && distance < nearestCab)
+                    { nearestCab = distance; cameraCab = pane.Cab; }
+                }
                 var body = pane.Window != null ? pane.Window.rb : pane.Cab.Car.rb;
                 pane.Velocity = body != null ? body.GetPointVelocity(pane.Frame.position) : Vector3.zero;
                 for (int i = 0; i < pane.Overlays.Count; i++)
@@ -209,12 +235,14 @@ namespace DVSeasons.Mod
                     {
                         var original = pane.Originals[i];
                         if (original == null) { pane.Overlays[i].enabled=false; continue; }
-                        SetProperties(pane, i);
                         pane.Overlays[i].enabled = original != null && original.enabled && !original.forceRenderingOff
                             && (pane.Cab.Climate.Frost > .005f || pane.Cab.Climate.Fog > .005f || snowfall > 0 || pane.Dirty);
-                        pane.Overlays[i].SetPropertyBlock(pane.Properties);
+                        if (now >= pane.NextProperties)
+                        { SetProperties(pane, i); pane.Overlays[i].SetPropertyBlock(pane.Properties); }
                     }
-                Wipe(pane);
+                if (now >= pane.NextProperties) pane.NextProperties = now + (distance < 1600 ? .1f : .5f);
+                if (distance < 1600)
+                    using (SnowPerformance.Measure("window-wipers")) Wipe(pane);
             }
             int budget = Math.Min(4, panes.Count);
             for (int i = 0; i < budget; i++)
@@ -222,15 +250,30 @@ namespace DVSeasons.Mod
                 cursor %= panes.Count;
                 var pane = panes[cursor++];
                 if (pane.Frame == null || now - pane.LastUpdate < .1f) continue;
-                UpdateMask(pane, Mathf.Min(1, now - pane.LastUpdate));
+                using (SnowPerformance.Measure("window-mask"))
+                    UpdateMask(pane, Mathf.Min(1, now - pane.LastUpdate));
                 pane.LastUpdate = now;
             }
         }
 
-        private void Discover(Camera camera, float now)
+        private void EnsureFrostPattern()
+        {
+            if (frostPattern != null && frostPattern.IsCreated()) return;
+            if (frostPattern == null)
+                frostPattern = new RenderTexture(1024,1024,0,RenderTextureFormat.ARGB32,RenderTextureReadWrite.Linear)
+                { name="DVSeasons shared frost crystals", useMipMap=true, autoGenerateMips=false,
+                    wrapMode=TextureWrapMode.Clamp, filterMode=FilterMode.Trilinear, hideFlags=HideFlags.HideAndDontSave };
+            frostPattern.Create();
+            var bake = new Material(shader); var previous = RenderTexture.active;
+            try { Graphics.Blit(null, frostPattern, bake, 1); frostPattern.GenerateMips(); }
+            finally { RenderTexture.active=previous; UnityEngine.Object.Destroy(bake); }
+        }
+
+        private IEnumerable<int> Discover(Camera camera, float now)
         {
             for (int i = panes.Count - 1; i >= 0; i--)
             {
+                yield return 0;
                 var p = panes[i];
                 if (p.FallbackRenderer != null && p.Cab.Car != null) continue;
                 if (p.Window == null)
@@ -245,12 +288,11 @@ namespace DVSeasons.Mod
                 }
                 known.Remove(p.Window); Release(p); panes.RemoveAt(i);
             }
-            // Exterior/LOD windows need frost even when native droplet simulation
-            // has unregistered the interior master. Discovery is once per second.
-            var windows=UnityEngine.Object.FindObjectsOfType<Window>();
-            Array.Sort(windows,(a,b)=>b.simulate.CompareTo(a.simulate));
-            foreach (var window in windows)
+            // Search only locomotive hierarchies, including detached doors and
+            // streamed interiors, rather than every object in the scene.
+            foreach (var window in LoadedWindows(camera))
             {
+                yield return 0;
                 if (window == null || known.Contains(window) || !window.gameObject.activeInHierarchy) continue;
                 var car = TrainCar.Resolve(window.transform);
                 if (car == null || !car.IsLoco) continue;
@@ -272,9 +314,9 @@ namespace DVSeasons.Mod
                 Cab cab;
                 if (!cabs.TryGetValue(car, out cab))
                 {
-                    cab = new Cab { Car = car };
+                    cab = new Cab { Car = car, Climate = CabHeating.CustomClimate(car) ?? new WindowWinterClimate() };
                     WindowClimateState saved;
-                    if (!string.IsNullOrEmpty(car.CarGUID) && savedClimates.TryGetValue(car.CarGUID, out saved)) cab.Climate.Restore(saved);
+                    if (!CabEngineHeating.IsCustomLocomotive(car) && !string.IsNullOrEmpty(car.CarGUID) && savedClimates.TryGetValue(car.CarGUID, out saved)) cab.Climate.Restore(saved);
                     cabs.Add(car, cab);
                 }
                 var pane = new Pane { Window = window, Cab = cab, LastUpdate = now };
@@ -290,7 +332,12 @@ namespace DVSeasons.Mod
                 InitializeWipers(pane);
                 panes.Add(pane); known.Add(window);
             }
-            DiscoverUnregisteredDm1uGlass(now);
+            foreach (var car in RailSnowGameSource.GetCars().ToArray())
+            {
+                yield return 0;
+                if (car != null && car.carType == DV.ThingTypes.TrainCarType.LocoDM1U)
+                    DiscoverDm1uCarGlass(car, now);
+            }
             removed.Clear();
             foreach (var pair in cabs)
                 if (pair.Key == null) removed.Add(pair.Key);
@@ -299,6 +346,30 @@ namespace DVSeasons.Mod
             {
                 reported = true;
                 Debug.Log("[DVSeasons] Winter windows ready: per-cab heater/air/glass temperatures, native wiper paths and snow impacts.");
+            }
+        }
+
+        private static IEnumerable<Window> LoadedWindows(Camera camera)
+        {
+            var roots = new HashSet<GameObject>();
+            var cars = RailSnowGameSource.GetCars().ToArray();
+            var position = camera != null ? camera.transform.position : Vector3.zero;
+            Array.Sort(cars,(a,b) =>
+                (a != null ? (a.transform.position-position).sqrMagnitude : float.MaxValue).CompareTo(
+                 b != null ? (b.transform.position-position).sqrMagnitude : float.MaxValue));
+            foreach (var car in cars)
+            {
+                yield return null;
+                if (car == null || !car.IsLoco || !car.gameObject.activeInHierarchy) continue;
+                // Interior masters first, so exterior duplicates share their mask.
+                foreach (var root in new[] { car.loadedInterior, car.gameObject,
+                    car.loadedExternalInteractables, car.interior != null ? car.interior.gameObject : null })
+                {
+                    if (root == null || !roots.Add(root)) continue;
+                    var windows = root.GetComponentsInChildren<Window>(true);
+                    Array.Sort(windows, (a,b) => b.simulate.CompareTo(a.simulate));
+                    foreach (var window in windows) yield return window;
+                }
             }
         }
 
@@ -379,7 +450,7 @@ namespace DVSeasons.Mod
                 if (filter == null || filter.sharedMesh == null) continue;
                 Cab cab;
                 if (!cabs.TryGetValue(car, out cab))
-                { cab = new Cab { Car = car }; cabs.Add(car, cab); }
+                { cab = new Cab { Car = car, Climate = CabHeating.CustomClimate(car) ?? new WindowWinterClimate() }; cabs.Add(car, cab); }
                 AddUnregisteredGlass(cab, visual, now);
             }
         }
@@ -518,6 +589,7 @@ namespace DVSeasons.Mod
             if (window == null) window = pane.Window;
             var climate = pane.Cab.Climate;
             pane.Properties.SetTexture("_SnowMask", pane.Mask);
+            pane.Properties.SetTexture("_FrostPattern", frostPattern);
             // This matrix is fixed in the mesh's local coordinates. Sampling a
             // world inverse here races late train/door animation and origin shifts.
             pane.Properties.SetMatrix("_MeshToPane", pane.VisualToPane[index]);
@@ -568,23 +640,43 @@ namespace DVSeasons.Mod
                 if (pane.WiperReady[w] && ((a - pane.LastStarts[w]).sqrMagnitude + (b - pane.LastEnds[w]).sqrMagnitude > .0000001f))
                 {
                     var c = pane.LastStarts[w]; var d = pane.LastEnds[w];
-                    int x0 = Mathf.Clamp((int)(Mathf.Min(a.x,b.x,c.x,d.x)*Resolution)-1,0,Resolution-1);
-                    int x1 = Mathf.Clamp((int)(Mathf.Max(a.x,b.x,c.x,d.x)*Resolution)+1,0,Resolution-1);
-                    int y0 = Mathf.Clamp((int)(Mathf.Min(a.y,b.y,c.y,d.y)*Resolution)-1,0,Resolution-1);
-                    int y1 = Mathf.Clamp((int)(Mathf.Max(a.y,b.y,c.y,d.y)*Resolution)+1,0,Resolution-1);
-                    for (int y=y0;y<=y1;y++) for(int x=x0;x<=x1;x++)
-                    {
-                        var p = new Vector2((x+.5f)/Resolution,(y+.5f)/Resolution);
-                        if (!Inside(p,a,b,c) && !Inside(p,b,c,d)) continue;
-                        int i=y*Resolution+x; var colour=pane.Pixels[i]; colour.r=0;
-                        // Hard frozen frost is not erased by a rubber blade;
-                        // thawed ice/snow and the remaining cloudy film are cleared.
-                        if (pane.Cab.Climate.GlassTemperature > 0) colour.g=255;
-                        pane.Pixels[i]=colour; pane.MaskChanged=true;
-                    }
+                    WipeTriangle(pane,a,b,c);
+                    WipeTriangle(pane,b,c,d);
                 }
                 pane.LastStarts[w]=a;pane.LastEnds[w]=b;pane.WiperReady[w]=true;
             }
+        }
+        private static void WipeTriangle(Pane pane, Vector2 a, Vector2 b, Vector2 c)
+        {
+            if (Mathf.Abs(Cross(b-a,c-a)) < .00000001f) return;
+            int y0=Math.Max(0,Mathf.CeilToInt(Mathf.Min(a.y,Mathf.Min(b.y,c.y))*Resolution-.5f));
+            int y1=Math.Min(Resolution-1,Mathf.FloorToInt(Mathf.Max(a.y,Mathf.Max(b.y,c.y))*Resolution-.5f));
+            bool thawed=pane.Cab.Climate.GlassTemperature>0;
+            // Intersect three edges once per row instead of testing two triangles
+            // for every pixel in the sweep's bounding rectangle.
+            for(int y=y0;y<=y1;y++)
+            {
+                float row=(y+.5f)/Resolution, left=float.PositiveInfinity,right=float.NegativeInfinity;
+                WipeEdge(a,b,row,ref left,ref right); WipeEdge(b,c,row,ref left,ref right); WipeEdge(c,a,row,ref left,ref right);
+                if(left>right) continue;
+                int x0=Math.Max(0,Mathf.CeilToInt(left*Resolution-.5f));
+                int x1=Math.Min(Resolution-1,Mathf.FloorToInt(right*Resolution-.5f));
+                for(int x=x0;x<=x1;x++)
+                {
+                    int index=y*Resolution+x;var colour=pane.Pixels[index];
+                    if(colour.r==0 && (!thawed || colour.g==255)) continue;
+                    colour.r=0;if(thawed)colour.g=255;
+                    pane.Pixels[index]=colour;pane.MaskChanged=true;
+                }
+            }
+        }
+        private static void WipeEdge(Vector2 a,Vector2 b,float y,ref float left,ref float right)
+        {
+            if(y<Mathf.Min(a.y,b.y) || y>Mathf.Max(a.y,b.y)) return;
+            if(Mathf.Abs(b.y-a.y)<.00000001f)
+            {left=Mathf.Min(left,Mathf.Min(a.x,b.x));right=Mathf.Max(right,Mathf.Max(a.x,b.x));return;}
+            float x=a.x+(y-a.y)*(b.x-a.x)/(b.y-a.y);
+            left=Mathf.Min(left,x);right=Mathf.Max(right,x);
         }
         private static float Cross(Vector2 a, Vector2 b) { return a.x*b.y-a.y*b.x; }
         private static bool Inside(Vector2 p, Vector2 a, Vector2 b, Vector2 c)
@@ -595,14 +687,13 @@ namespace DVSeasons.Mod
         }
         public bool Collide(Vector3 from, Vector3 to, float seconds)
         {
-            foreach (var pane in panes)
+            foreach (var pane in collisionPanes)
             {
                 var window=pane.Window;
-                if(pane.Frame==null || !pane.Frame.gameObject.activeInHierarchy ||
-                    (to-pane.Frame.position).sqrMagnitude>400) continue;
+                if((to-pane.CollisionCentre).sqrMagnitude>400) continue;
                 // Test relative movement so a moving locomotive intercepts flakes
                 // even when the particle's own horizontal velocity is near zero.
-                var matrix=MovingPaneMatrix(pane);
+                var matrix=pane.CollisionMatrix;
                 var localTo=matrix.MultiplyPoint3x4(to);
                 var localFrom=matrix.MultiplyPoint3x4(from+pane.Velocity*seconds);
                 if(localFrom.z*localTo.z>0 || Mathf.Abs(localFrom.z-localTo.z)<.00001f) continue;
@@ -632,18 +723,12 @@ namespace DVSeasons.Mod
         {
             // Cab clearing must not delete flakes approaching the outside of a
             // windshield. Use the nearby cab's window planes as its enclosure.
-            Cab nearest = null; float distance = 25;
-            foreach (var pane in panes)
-            {
-                if (pane.Window == null) continue;
-                float d = (pane.Window.transform.position - camera).sqrMagnitude;
-                if (d < distance) { distance = d; nearest = pane.Cab; }
-            }
+            Cab nearest = cameraCab;
             if (nearest == null) return false;
-            foreach (var pane in panes)
+            foreach (var pane in collisionPanes)
             {
                 if (pane.Cab != nearest || pane.Window == null) continue;
-                var matrix = MovingPaneMatrix(pane);
+                var matrix = pane.CollisionMatrix;
                 float cameraSide = matrix.MultiplyPoint3x4(camera).z;
                 float particleSide = matrix.MultiplyPoint3x4(particle).z;
                 if (Mathf.Abs(cameraSide) > .03f && cameraSide * particleSide < 0) return true;
@@ -671,8 +756,12 @@ namespace DVSeasons.Mod
         }
         public void Dispose()
         {
+            collisionPanes.Clear(); cameraCab=null;
+            if(frostPattern!=null) UnityEngine.Object.Destroy(frostPattern); frostPattern=null;
             if(active == this) active = null;
             foreach(var pane in panes) Release(pane);
+            if (discovery != null) discovery.Dispose();
+            discovery = null;
             panes.Clear();known.Clear();boundVisuals.Clear();cabs.Clear();removed.Clear();savedClimates.Clear();savedMasks.Clear();shader=null;nextScan=nextClimate=lastClimate=0;cursor=0;reported=false;
         }
     }

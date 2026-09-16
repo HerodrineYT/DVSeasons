@@ -18,8 +18,11 @@ namespace DVSeasons.Mod
         public float SnowGlareReduction = 1f;
         // Default to the unlimited (rightmost) position of the leaf slider.
         public int AutumnLeafLimit = 0;
+        public bool AutumnLeavesEnabled = true;
         public bool InsectsEnabled = true;
         public bool WinterWindowsEnabled = true;
+        public KeyBinding CabHeaterHotkey = new KeyBinding();
+        public bool EngineHeatingWithoutSwitch = true;
         // Retained only for settings-file compatibility. Snowfall now follows the
         // native WeatherDriver.RainValue exclusively.
         public float AmbientWinterSnowfall;
@@ -75,6 +78,7 @@ namespace DVSeasons.Mod
 
         public void Clamp()
         {
+            if (CabHeaterHotkey == null) CabHeaterHotkey = new KeyBinding();
             if (float.IsNaN(SnowGlareReduction) || float.IsInfinity(SnowGlareReduction)) SnowGlareReduction = 1f;
             SnowGlareReduction = System.Math.Max(0f, System.Math.Min(2f, SnowGlareReduction));
             // These features are part of the default visual/physics profile. They are

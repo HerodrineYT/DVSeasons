@@ -24,6 +24,17 @@ namespace DVSeasons.Core
 
         public void Advance(float seconds, float outside, bool running, float engineTemperature,
             float heater, bool openings, float winterCoverage)
+        { AdvanceCore(seconds, outside, running, engineTemperature, heater, openings, winterCoverage, false); }
+
+        // Direct engine heat has already been limited by coolant/engine warmup.
+        // Do not put it through another slow electrical-heater warmup sequence.
+        public void AdvanceEngineHeated(float seconds, float outside, bool running, float engineTemperature,
+            float heat, bool openings, float winterCoverage)
+        { AdvanceCore(seconds, outside, running, engineTemperature,
+            (float)Math.Sqrt(Clamp(Finite(heat, 0))), openings, winterCoverage, true); }
+
+        private void AdvanceCore(float seconds, float outside, bool running, float engineTemperature,
+            float heater, bool openings, float winterCoverage, bool directEngineHeat)
         {
             outside = Finite(outside, 0);
             heater = Clamp(Finite(heater, 0));
@@ -41,7 +52,7 @@ namespace DVSeasons.Core
             // A powered heater starts warming before the engine and cabin finish
             // heating. Opening the cab increases exchange with outdoor air.
             float heaterTarget = outside + heater * (Math.Max(35, outside + 42) - outside);
-            HeaterTemperature = Approach(HeaterTemperature, heaterTarget, seconds, heater > 0 ? 18 : 65);
+            HeaterTemperature = Approach(HeaterTemperature, heaterTarget, seconds, heater > 0 ? (directEngineHeat ? 6 : 18) : 65);
             float cabTarget = outside + heater * Math.Max(0, HeaterTemperature - outside) * .72f
                 + engineHeat * (heater > 0 ? 10 : 2);
             // Keep heater power unchanged and add outdoor air exchange. Speeding
@@ -51,10 +62,16 @@ namespace DVSeasons.Core
             float ventilation = openings ? 1f / 12f : 0;
             float exchange = sealedExchange + ventilation;
             cabTarget = (cabTarget * sealedExchange + outside * ventilation) / exchange;
-            CabinTemperature = Approach(CabinTemperature, cabTarget, seconds, 1f / exchange);
+            // Faster heat delivery in a closed cab; retain outdoor exchange and
+            // the original cooldown so opening a door still defeats the heater.
+            float cabinSeconds = directEngineHeat && !openings && heater > 0 && cabTarget > CabinTemperature
+                ? 22 : 1f / exchange;
+            CabinTemperature = Approach(CabinTemperature, cabTarget, seconds, cabinSeconds);
             float glassTarget = outside * .22f + CabinTemperature * .78f
                 + heater * Math.Max(0, HeaterTemperature - CabinTemperature) * .18f;
-            GlassTemperature = Approach(GlassTemperature, glassTarget, seconds, heater > 0 ? 35 : 90);
+            float glassSeconds = heater > 0 ? 35 : 90;
+            if (directEngineHeat && heater > 0 && glassTarget > GlassTemperature) glassSeconds = 18;
+            GlassTemperature = Approach(GlassTemperature, glassTarget, seconds, glassSeconds);
             // A warmer season or a heater switch alone cannot melt a cold pane.
             // Frost cannot persist once the outside air is clearly above
             // freezing.  Previously a saved cold pane could carry its crystal

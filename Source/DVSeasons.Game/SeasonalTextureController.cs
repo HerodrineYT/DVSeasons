@@ -721,6 +721,7 @@ namespace DVSeasons.Mod
         private readonly HashSet<SeasonalTextureSet> queued = new HashSet<SeasonalTextureSet>();
         private readonly SeasonAssetBundleRepository texturePack;
         private float nextScanTime;
+        private IEnumerator<int> materialScan;
         private int lastStyleKey = int.MinValue;
         private int configurationKey = int.MinValue;
         private bool active;
@@ -757,17 +758,13 @@ namespace DVSeasons.Mod
             if (configurationKey != int.MinValue && configurationKey != newConfigurationKey) Reset();
             active = true;
             configurationKey = newConfigurationKey;
-            if (Time.realtimeSinceStartup >= nextScanTime)
+            if (materialScan == null && Time.realtimeSinceStartup >= nextScanTime)
             {
-                // The full material registry is large and enumeration can briefly
-                // stall a frame. Seasonal assets rarely appear after world load, so
-                // a slower rescan keeps streamed content support without periodic
-                // twelve-second hitches.
                 nextScanTime = Time.realtimeSinceStartup + 30f;
-                if (settings.TerrainTextureChanges || settings.VegetationTextureChanges)
-                    ScanVegetationMaterials(settings);
-                if (settings.TerrainTextureChanges && !proceduralSnow) ScanBuiltSurfaceTextures(settings);
+                materialScan = ScanMaterials(settings).GetEnumerator();
             }
+            using (SnowPerformance.Measure("season-material-discovery"))
+                FrameDiscovery.Advance(ref materialScan);
 
             var styleKey = BuildStyleKey(state, settings.TextureChangeStrength);
             if (styleKey != lastStyleKey)
@@ -820,15 +817,27 @@ namespace DVSeasons.Mod
 
         public void Dispose() { Reset(); }
 
-        private void ScanVegetationMaterials(SeasonModSettings settings)
+        private IEnumerable<int> ScanMaterials(SeasonModSettings settings)
         {
-            var materials = Resources.FindObjectsOfTypeAll<Material>();
+            if (settings.TerrainTextureChanges || settings.VegetationTextureChanges)
+                foreach (var step in ScanVegetationMaterials(settings)) yield return step;
+            if (settings.TerrainTextureChanges && !proceduralSnow)
+                foreach (var step in ScanBuiltSurfaceTextures(settings)) yield return step;
+        }
+
+        private IEnumerable<int> ScanVegetationMaterials(SeasonModSettings settings)
+        {
+            Material[] materials;
+            using (SnowPerformance.Measure("season-material-snapshot"))
+                materials = Resources.FindObjectsOfTypeAll<Material>();
             for (var i = 0; i < materials.Length; i++)
             {
+                yield return 0;
                 var material = materials[i];
-                if (material == null || material.name.IndexOf("DVSeasons", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                if (material == null) continue;
                 var materialId = material.GetInstanceID();
                 if (!scannedMaterials.Add(materialId)) continue;
+                if (material.name.IndexOf("DVSeasons", StringComparison.OrdinalIgnoreCase) >= 0) continue;
                 var shaderName = material.shader == null ? string.Empty : material.shader.name;
                 if (IsTerrainImposterMaterial(material.name + " " + shaderName)) continue;
                 var propertyNames = material.GetTexturePropertyNames();
@@ -868,11 +877,12 @@ namespace DVSeasons.Mod
             }
         }
 
-        private void ScanBuiltSurfaceTextures(SeasonModSettings settings)
+        private IEnumerable<int> ScanBuiltSurfaceTextures(SeasonModSettings settings)
         {
             var added = 0;
             foreach (var renderer in Resources.FindObjectsOfTypeAll<MeshRenderer>())
             {
+                yield return 0;
                 if (renderer == null || !renderer.gameObject.scene.IsValid() ||
                     !renderer.gameObject.scene.isLoaded || !scannedSurfaceRenderers.Add(renderer.GetInstanceID())) continue;
                 var filter = renderer.GetComponent<MeshFilter>();
@@ -1004,6 +1014,8 @@ namespace DVSeasons.Mod
             queuedTrackUpdates.Clear();
             updateQueue.Clear();
             queued.Clear();
+            if (materialScan != null) materialScan.Dispose();
+            materialScan = null;
             nextScanTime = nextBindingCheck = 0f;
             lastStyleKey = int.MinValue;
             configurationKey = int.MinValue;

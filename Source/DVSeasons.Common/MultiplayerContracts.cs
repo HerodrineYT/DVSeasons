@@ -5,7 +5,7 @@ namespace DVSeasons.Core
 {
     public sealed class SeasonNetworkState
     {
-        public const int CurrentProtocol = 8;
+        public const int CurrentProtocol = 9;
         public int Protocol { get; set; }
         public uint Sequence { get; set; }
         public double Phase { get; set; }
@@ -26,6 +26,7 @@ namespace DVSeasons.Core
         public uint SeasonSelectionRevision { get; set; }
         public bool HasSurfaceSnowCoverage { get; set; }
         public float SurfaceSnowCoverage { get; set; }
+        public WeatherNetworkState Weather { get; set; } = new WeatherNetworkState();
 
         public static SeasonNetworkState FromState(SeasonState state, float daysPerSeason = 1f,
             float transitionDays = 1f, float rainIntensity = 0f, float windVelocityX = 0f,
@@ -70,7 +71,7 @@ namespace DVSeasons.Core
                 IsFiniteInRange(WindVelocityX, -20f, 20f) &&
                 IsFiniteInRange(WindVelocityZ, -20f, 20f) &&
                 IsFiniteInRange(SnowLightFactor, 0f, 1f) &&
-                IsFiniteInRange(SurfaceSnowCoverage, 0f, 1f);
+                IsFiniteInRange(SurfaceSnowCoverage, 0f, 1f) && Weather != null && Weather.IsValid();
         }
 
         public void WriteTo(BinaryWriter writer)
@@ -96,6 +97,7 @@ namespace DVSeasons.Core
             writer.Write(SeasonSelectionRevision);
             writer.Write(HasSurfaceSnowCoverage);
             writer.Write(SurfaceSnowCoverage);
+            Weather.WriteTo(writer);
         }
 
         public static SeasonNetworkState ReadFrom(BinaryReader reader)
@@ -126,7 +128,8 @@ namespace DVSeasons.Core
                 SnowLightFactor = reader.ReadSingle(),
                 SeasonSelectionRevision = reader.ReadUInt32(),
                 HasSurfaceSnowCoverage = reader.ReadBoolean(),
-                SurfaceSnowCoverage = reader.ReadSingle()
+                SurfaceSnowCoverage = reader.ReadSingle(),
+                Weather = WeatherNetworkState.ReadFrom(reader)
             };
         }
 

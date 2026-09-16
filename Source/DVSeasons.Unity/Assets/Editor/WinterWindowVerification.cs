@@ -18,6 +18,8 @@ namespace DVSeasons.AssetBundleBuild
             var shader = bundle.LoadAsset<Shader>("assets/dvseasons/dv99/shaders/winterwindow.shader");
             if (shader == null || !shader.isSupported) throw new Exception("Winter window shader unavailable.");
             var material = new Material(shader);
+            var pattern = new RenderTexture(1024,1024,0,RenderTextureFormat.ARGB32,RenderTextureReadWrite.Linear);
+            pattern.Create(); Graphics.Blit(null,pattern,material,1); material.SetTexture("_FrostPattern",pattern);
             var target = new RenderTexture(256,256,24,RenderTextureFormat.ARGB32,RenderTextureReadWrite.Linear);
             var pixels = new Texture2D(256,256,TextureFormat.RGBA32,false,true);
             var mask = new Texture2D(1,1,TextureFormat.RGBA32,false,true);
@@ -40,7 +42,7 @@ namespace DVSeasons.AssetBundleBuild
                     material.SetVector("_Climate",new Vector4(frost,fog,0,glassTemperature));
                     cmd.Clear();cmd.SetRenderTarget(target);cmd.ClearRenderTarget(true,true,Color.black);
                     cmd.SetViewProjectionMatrices(Matrix4x4.identity,Matrix4x4.identity);
-                    cmd.DrawMesh(mesh,Matrix4x4.identity,material);Graphics.ExecuteCommandBuffer(cmd);
+                    cmd.DrawMesh(mesh,Matrix4x4.identity,material,0,0);Graphics.ExecuteCommandBuffer(cmd);
                     RenderTexture.active=target;pixels.ReadPixels(new Rect(0,0,256,256),0,0);pixels.Apply();
                     float sum=0;foreach(var c in pixels.GetPixels())sum+=c.r;
                     return sum/65536;
@@ -110,7 +112,7 @@ namespace DVSeasons.AssetBundleBuild
                     {
                         cmd.Clear();cmd.SetRenderTarget(target);cmd.ClearRenderTarget(true,true,Color.black);
                         cmd.SetViewProjectionMatrices(moving.inverse,Matrix4x4.identity);
-                        cmd.DrawMesh(mesh,moving,material);Graphics.ExecuteCommandBuffer(cmd);
+                        cmd.DrawMesh(mesh,moving,material,0,0);Graphics.ExecuteCommandBuffer(cmd);
                         RenderTexture.active=target;pixels.ReadPixels(new Rect(0,0,256,256),0,0);pixels.Apply();
                         float error=0;var actual=pixels.GetPixels32();
                         for(int i=0;i<actual.Length;i++) error+=Math.Abs(actual[i].r-reference[i].r)/255f;
@@ -160,7 +162,7 @@ namespace DVSeasons.AssetBundleBuild
                         material.SetVector("_Climate",new Vector4(layer==0?1:0,layer==2?.65f:0,0,step*.1f));
                         cmd.Clear();cmd.SetRenderTarget(target);cmd.ClearRenderTarget(true,true,Color.black);
                         cmd.SetViewProjectionMatrices(Matrix4x4.identity,Matrix4x4.identity);
-                        cmd.DrawMesh(mesh,Matrix4x4.identity,material);Graphics.ExecuteCommandBuffer(cmd);
+                        cmd.DrawMesh(mesh,Matrix4x4.identity,material,0,0);Graphics.ExecuteCommandBuffer(cmd);
                         RenderTexture.active=target;pixels.ReadPixels(new Rect(0,0,256,256),0,0);pixels.Apply();
                         var current=pixels.GetPixels32();
                         if(last!=null)
@@ -179,7 +181,7 @@ namespace DVSeasons.AssetBundleBuild
                 mask.SetPixel(0,0,Color.red);mask.Apply();
                 cmd.Clear();cmd.SetRenderTarget(target);cmd.ClearRenderTarget(true,true,Color.black);
                 cmd.SetViewProjectionMatrices(Matrix4x4.identity,Matrix4x4.identity);
-                cmd.DrawMesh(mesh,Matrix4x4.identity,material);Graphics.ExecuteCommandBuffer(cmd);
+                cmd.DrawMesh(mesh,Matrix4x4.identity,material,0,0);Graphics.ExecuteCommandBuffer(cmd);
                 RenderTexture.active=target;pixels.ReadPixels(new Rect(0,0,256,256),0,0);pixels.Apply();
                 foreach(var c in pixels.GetPixels()) if(c.r+c.g+c.b>.001f)
                     throw new Exception("Warm glass retained ice/snow pixels at +5C.");
@@ -188,7 +190,7 @@ namespace DVSeasons.AssetBundleBuild
             finally
             {
                 RenderTexture.active=previous;cmd.Dispose();
-                foreach(var obj in new UnityEngine.Object[]{material,target,pixels,mask,mesh}) UnityEngine.Object.DestroyImmediate(obj);
+                foreach(var obj in new UnityEngine.Object[]{material,target,pixels,mask,mesh,pattern}) UnityEngine.Object.DestroyImmediate(obj);
             }
         }
     }

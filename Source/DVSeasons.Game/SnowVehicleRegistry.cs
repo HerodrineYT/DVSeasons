@@ -151,6 +151,7 @@ namespace DVSeasons.Mod
         private bool cameraPositionKnown;
         private Type trainType;
         public Func<IEnumerable<Component>> DiscoverVehicles;
+        public Func<IEnumerable<Transform>> DiscoverMovingRoots;
         private static readonly int DataId = Shader.PropertyToID("_DVPSVehicleData");
         public int Revision { get; private set; }
         public int CaptureCount { get; private set; }
@@ -222,10 +223,18 @@ namespace DVSeasons.Mod
                 if (trainType == null)
                     foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
                     { trainType = assembly.GetType("TrainCar",false); if (trainType != null) break; }
-                if (trainType != null)
+                if (trainType != null || DiscoverMovingRoots != null)
                 {
                     var candidates = new List<Component>();
+                    var moving = new List<Transform>();
                     var allLive=new HashSet<int>();
+                    if (DiscoverMovingRoots != null) foreach (var root in DiscoverMovingRoots())
+                    {
+                        if (root == null || !root.gameObject.scene.IsValid() || !root.gameObject.activeInHierarchy) continue;
+                        if (!allLive.Add(root.GetInstanceID())) continue;
+                        TrackStaticRoot(root, null, null);
+                        if ((root.position-camera.transform.position).sqrMagnitude <= 90000f) moving.Add(root);
+                    }
                     foreach (var item in DiscoverVehicles != null ? DiscoverVehicles() : Array.Empty<Component>())
                     {
                         var component = item as Component;
@@ -241,20 +250,27 @@ namespace DVSeasons.Mod
                     foreach(var id in departed) staticVehicles.Remove(id);
                     candidates.Sort((a,b) => (a.transform.position-camera.transform.position).sqrMagnitude.CompareTo(
                         (b.transform.position-camera.transform.position).sqrMagnitude));
+                    moving.Sort((a,b) => (a.position-camera.transform.position).sqrMagnitude.CompareTo(
+                        (b.position-camera.transform.position).sqrMagnitude));
+                    // A turntable bridge owns its snow in exactly the same local
+                    // frame as a car. Reserve its slice before filling the car cache.
+                    int movingCount=Mathf.Min(Capacity,moving.Count);
+                    int carCount=Mathf.Min(Capacity-movingCount,candidates.Count);
                     var live = new HashSet<int>();
-                    for(var i=0;i<Mathf.Min(Capacity,candidates.Count);i++) live.Add(candidates[i].GetInstanceID());
+                    for(var i=0;i<movingCount;i++) live.Add(moving[i].GetInstanceID());
+                    for(var i=0;i<carCount;i++) live.Add(candidates[i].transform.GetInstanceID());
                     // Remove departed/deleted cars before assigning free array slices.
                     for (var i=vehicles.Count-1;i>=0;i--)
                     {
                         var v=vehicles[i];
-                        var component=v.Root != null ? v.Root.gameObject.GetComponent(trainType) : null;
-                        if (component != null && live.Contains(component.GetInstanceID())) continue;
+                        if (v.Root != null && live.Contains(v.RootId)) continue;
                         Unsubscribe(v);
                         usedSlots[v.Slot]=false;
                         byId.Remove(v.RootId);
                         vehicles.RemoveAt(i); Revision++;
                     }
-                    for(var i=0;i<Mathf.Min(Capacity,candidates.Count);i++)
+                    for(var i=0;i<movingCount;i++) Register(moving[i],null);
+                    for(var i=0;i<carCount;i++)
                     {
                         var item=candidates[i];
                         Register(item.transform,ReadTransform(item,"interior"),ReadTransform(item,"interiorLOD"));
@@ -348,6 +364,7 @@ namespace DVSeasons.Mod
                 foreach (var renderer in root.GetComponentsInChildren<Renderer>(true))
                 {
                     if (!(renderer is MeshRenderer) && !(renderer is SkinnedMeshRenderer)) continue;
+                    if (renderer.shadowCastingMode == ShadowCastingMode.ShadowsOnly) continue;
                     if (!seen.Add(renderer.GetInstanceID())) continue;
                     var t=renderer.transform;
                     var interior=(v.Interior != null && t.IsChildOf(v.Interior)) ||
@@ -398,6 +415,10 @@ namespace DVSeasons.Mod
                 if(component==null) continue;
                 TrackStaticRoot(component.transform,ReadTransform(component,"interior"),ReadTransform(component,"interiorLOD"));
             }
+            // Do not bake the rotating bridge into the stationary world's height
+            // map: otherwise its old position leaves a snow-shaped hole in the pit.
+            if (DiscoverMovingRoots != null) foreach (var root in DiscoverMovingRoots())
+                if (root != null) TrackStaticRoot(root,null,null);
             hidden.Clear();
             foreach(var sv in staticVehicles.Values)
             {

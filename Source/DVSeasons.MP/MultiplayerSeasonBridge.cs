@@ -311,7 +311,8 @@ namespace DVSeasons.Multiplayer
                 SnowLightFactor = source.SnowLightFactor,
                 SeasonSelectionRevision = source.SeasonSelectionRevision,
                 HasSurfaceSnowCoverage = source.HasSurfaceSnowCoverage,
-                SurfaceSnowCoverage = source.SurfaceSnowCoverage
+                SurfaceSnowCoverage = source.SurfaceSnowCoverage,
+                Weather = source.Weather == null ? null : source.Weather.Clone()
             };
         }
     }

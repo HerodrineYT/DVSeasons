@@ -43,7 +43,7 @@ namespace DVSeasons.Mod
 
         public bool Ensure(TrainCar car)
         {
-            if (disposed || !IsSupported(car) || car.loadedInterior == null) return false;
+            if (disposed || !IsSupported(car) || car.carType == TrainCarType.LocoDM1U || car.loadedInterior == null) return false;
             var carId = GetCarId(car);
             if (string.IsNullOrEmpty(carId)) return false;
 
@@ -168,8 +168,9 @@ namespace DVSeasons.Mod
 
         public static bool IsSupported(TrainCar car)
         {
-            if (car == null) return false;
+            if (car == null || CabEngineHeating.IsCustomLocomotive(car)) return false;
             return car.carType == TrainCarType.LocoShunter ||
+                car.carType == TrainCarType.LocoDM1U ||
                 car.carType == TrainCarType.LocoDH4 ||
                 car.carType == TrainCarType.LocoDM3 ||
                 car.carType == TrainCarType.LocoDiesel;

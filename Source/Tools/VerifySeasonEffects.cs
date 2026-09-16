@@ -41,6 +41,9 @@ public static class VerifySeasonEffects
         var adapter = Activator.CreateInstance(mod.GetType("DVSeasons.Mod.WeatherAdapter", true), true);
         Set(adapter, "driver", driver);
         var isolation = Get(adapter, "isolation");
+        var singleton = typeof(DV.Utils.SingletonBehaviour<WeatherDriver>).GetField("_instance", All);
+        var previousDriver = singleton.GetValue(null); singleton.SetValue(null,driver);
+        var provider = go.AddComponent<DV.UI.LocoHUD.PhotoModeWeatherSettingsProvider>();
         try
         {
             Call(isolation, "Enable", adapter);
@@ -76,9 +79,22 @@ public static class VerifySeasonEffects
             Call(adapter, "ReleaseWetnessOverride");
             Require(driver.WetnessValue.IsOverridden && driver.WetnessValue.CurrentValue == .2f,
                 "External wetness baseline was not restored");
+            foreach (float manual in new[] { 0f, .8f, .15f })
+            {
+                provider.SetWeatherOverride(DV.UI.LocoHUD.PhotoModeWeatherController.WeatherSettingType.WetnessValue,manual);
+                for(int tick=0;tick<5;tick++) Call(adapter,"ApplyWinterAdhesion",winter,true,false);
+                Require(driver.WetnessValue.CurrentValue == manual,"Sandbox wetness was overwritten");
+                Call(driver,"UpdateWetnessHours",.1f,1f);
+                Require(driver.WetnessValue.CurrentValue == manual,"Drying changed manual Sandbox override");
+            }
+            provider.ClearWeatherOverride(DV.UI.LocoHUD.PhotoModeWeatherController.WeatherSettingType.WetnessValue);
+            Call(adapter,"ApplyWinterAdhesion",winter,true,false);
+            Require(driver.WetnessValue.CurrentValue==.5f,"Resetting Sandbox did not resume seasonal adhesion");
+            Debug.Log("Sandbox wetness: manual 0/.8/.15 preserved with external-priority option off; reset resumes winter adhesion.");
         }
         finally
         {
+            singleton.SetValue(null,previousDriver);
             ((IDisposable)adapter).Dispose(); UnityEngine.Object.DestroyImmediate(go);
             fixturePatch.UnpatchAll("DVSeasons.VerifySeasonEffects.Fixture");
         }

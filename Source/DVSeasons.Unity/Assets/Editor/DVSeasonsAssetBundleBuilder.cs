@@ -70,8 +70,8 @@ namespace DVSeasons.AssetBundleBuild
             for (var i = 0; i < shaderGuids.Length; i++)
                 shaderAssets.Add(AssetDatabase.GUIDToAssetPath(shaderGuids[i]));
             shaderAssets.Sort(StringComparer.Ordinal);
-            if (shaderAssets.Count != 9)
-                throw new InvalidOperationException("Expected 9 Shader assets, found " +
+            if (shaderAssets.Count != 10)
+                throw new InvalidOperationException("Expected 10 Shader assets, found " +
                     shaderAssets.Count);
             assets.AddRange(shaderAssets);
             assets.Add(AssetRoot + "/Generated/Terrain_spring.asset");
@@ -90,7 +90,11 @@ namespace DVSeasons.AssetBundleBuild
                 throw new InvalidOperationException("Unity did not produce " + BundleName);
             foreach (var shaderPath in shaderAssets)
                 if (ShaderUtil.ShaderHasError(AssetDatabase.LoadAssetAtPath<Shader>(shaderPath)))
+                {
+                    foreach(var error in ShaderUtil.GetShaderMessages(AssetDatabase.LoadAssetAtPath<Shader>(shaderPath)))
+                        Debug.LogError("SHADER_BUILD_ERROR: "+error.message+" at "+error.file+":"+error.line+" ("+error.platform+")");
                     throw new InvalidOperationException("Shader compilation failed: " + shaderPath);
+                }
             var verifiedBundle = AssetBundle.LoadFromFile(Path.Combine(output, BundleName));
             if (verifiedBundle == null) throw new InvalidOperationException("Cannot reopen built bundle.");
             try
@@ -101,10 +105,11 @@ namespace DVSeasons.AssetBundleBuild
                 AutumnLeafVerification.Verify(verifiedBundle);
                 SpringTerrainVerification.Verify(verifiedBundle);
                 SnowGlareVerification.Verify(verifiedBundle);
+                SnowDustVerification.Verify(verifiedBundle);
             }
             finally { verifiedBundle.Unload(true); }
             Debug.Log("DVSeasons AssetBundle built: " + Path.Combine(output, BundleName) +
-                " (75 textures + 9 shaders + 3 MicroSplat terrain arrays; " +
+                " (75 textures + 10 shaders + 3 MicroSplat terrain arrays; " +
                 "96 duplicate source/override textures omitted)");
         }
 

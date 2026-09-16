@@ -12,6 +12,7 @@ namespace DVSeasons.Mod
         private sealed class Entry
         {
             public Texture Source;
+            public Texture Original;
             public RenderTexture Output;
             public int Step=-1, Revision=-1;
             public bool Failed;
@@ -21,6 +22,13 @@ namespace DVSeasons.Mod
         private Material material;
         public int BuildCount { get; private set; }
         public SpringTerrainTint(SeasonAssetBundleRepository repository) { this.repository=repository; }
+
+        public Texture OriginalFor(Texture output)
+        {
+            foreach (var entry in entries.Values)
+                if (entry.Output == output) return entry.Original;
+            return null;
+        }
 
         public Texture Get(Texture original,Texture source,int step,int revision)
         {
@@ -38,7 +46,8 @@ namespace DVSeasons.Mod
             Entry entry;int key=original.GetInstanceID();
             if(!entries.TryGetValue(key,out entry)) entries.Add(key,entry=new Entry());
             if(entry.Failed) return source;
-            if(entry.Output!=null && entry.Source==source && entry.Step==step && entry.Revision==revision) return entry.Output;
+            entry.Original = original;
+            if(entry.Output!=null && entry.Output.IsCreated() && entry.Source==source && entry.Step==step && entry.Revision==revision) return entry.Output;
             var previous=RenderTexture.active;RenderTexture scratch=null;
             try
             {
@@ -52,6 +61,7 @@ namespace DVSeasons.Mod
                         filterMode=FilterMode.Trilinear,anisoLevel=source.anisoLevel,hideFlags=HideFlags.HideAndDontSave};
                     if(!entry.Output.Create()) throw new InvalidOperationException("Cannot allocate spring terrain array");
                 }
+                if (!entry.Output.IsCreated()) entry.Output.Create();
                 scratch=RenderTexture.GetTemporary(width,height,0,RenderTextureFormat.ARGB32,RenderTextureReadWrite.Default);
                 material.SetTexture("_SpringSource",source);material.SetFloat("_SpringWeight",step/32f);
                 for(int slice=0;slice<depth;slice++)

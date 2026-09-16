@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace DVSeasons.Mod
 {
-    internal sealed class WeatherAdapter : IDisposable
+    internal sealed partial class WeatherAdapter : IDisposable
     {
         private readonly SeasonalClimateController climate = new SeasonalClimateController();
         private readonly SeasonalWeatherIsolation isolation = new SeasonalWeatherIsolation();
@@ -21,6 +21,18 @@ namespace DVSeasons.Mod
         private readonly WetnessOverrideOwnership wetnessOwnership=new WetnessOverrideOwnership();
         private readonly WeatherOverrideOwnership thunderOwnership = new WeatherOverrideOwnership();
         private int adhesionStatus=-1;
+        private bool manualWetness;
+        private bool manualThunder;
+        internal void ManualWetness(bool enabled)
+        {
+            ReleaseWetnessOverride();
+            manualWetness = enabled;
+        }
+        internal void ManualThunder(bool enabled)
+        {
+            ReleaseThunderOverride();
+            manualThunder = enabled;
+        }
         private bool capturedPrecipitation;
         private bool appliedPrecipitation;
         private Vector2 originalRainRangeStart;
@@ -128,6 +140,8 @@ namespace DVSeasons.Mod
                 return;
             }
             var wetness = driver.WetnessValue;
+            if (manualWetness && wetness.IsOverridden) return;
+            manualWetness = false;
             if(!wetnessOwnership.Acquire(wetness.IsOverridden,wetness.OverriddenValue,respectExternalOverride))
             {
                 if(adhesionStatus!=1) Debug.Log("[DVSeasons] Seasonal adhesion is waiting for an external wetness override to end. Wetness="+wetness.CurrentValue);
@@ -184,6 +198,8 @@ namespace DVSeasons.Mod
             }
 
             var thunder = driver.ThunderValue;
+            if (manualThunder && thunder.IsOverridden) return;
+            manualThunder = false;
             thunderOwnership.Acquire(thunder.IsOverridden, thunder.OverriddenValue, false);
             thunder.EngageOverride(0f);
             thunderOwnership.Applied(0f);
@@ -251,6 +267,7 @@ namespace DVSeasons.Mod
 
         public void ResetForSession()
         {
+            ResetNetworkWeather();
             climate.Reset();
             ReleaseWetnessOverride();
             ReleaseSeasonalPrecipitation();

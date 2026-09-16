@@ -36,6 +36,7 @@ namespace DVSeasons.Mod
         private readonly WinterPuddleController winterPuddles;
         private readonly ProceduralSnowController proceduralSurfaceSnow;
         private readonly RailSnowGameSource railSnowSource = new RailSnowGameSource();
+        private readonly TurntableSnowSource turntableSnowSource = new TurntableSnowSource();
         private readonly LocomotiveSnowHeatController locomotiveHeat = new LocomotiveSnowHeatController();
         private readonly TenderCoalSnowController tenderCoal;
         private readonly TrainSnowTrailController trainSnowTrail;
@@ -67,8 +68,8 @@ namespace DVSeasons.Mod
         {
             this.modPath = modPath ?? string.Empty;
             snowFootsteps = new SnowFootstepAudioController(this.modPath);
-            trainSnowTrail = new TrainSnowTrailController(this.modPath);
             texturePack = new SeasonAssetBundleRepository(modPath);
+            trainSnowTrail = new TrainSnowTrailController(texturePack);
             autumnLeaves = new AutumnLeafGroundController(texturePack);
             springLife = new SpringLifeController(this.modPath);
             winterWindows = new WinterWindowController(texturePack);
@@ -80,6 +81,7 @@ namespace DVSeasons.Mod
             winterPuddles = new WinterPuddleController(texturePack);
             proceduralSurfaceSnow = new ProceduralSnowController(texturePack);
             proceduralSurfaceSnow.SetVehicleDiscovery(() => RailSnowGameSource.GetCars());
+            proceduralSurfaceSnow.SetMovingSurfaceDiscovery(turntableSnowSource.GetRoots);
             proceduralSurfaceSnow.SetVehicleSnowRemaining(locomotiveHeat.Remaining);
             proceduralSurfaceSnow.SetVehicleSaveIdentity(source => (source as TrainCar)?.CarGUID);
             snowFootsteps.SetVehicleSnowRemaining(locomotiveHeat.RemainingAt);
@@ -87,7 +89,7 @@ namespace DVSeasons.Mod
             proceduralSurfaceSnow.BeforeSnowRender = () =>
             {
                 proceduralSurfaceSnow.SetWorldOffset(DV.OriginShift.OriginShift.currentMove);
-                railSnowSource.Update(proceduralSurfaceSnow.RailTracks);
+                railSnowSource.Update(proceduralSurfaceSnow.RailTracks, trainSnowTrail.WheelAt, trainSnowTrail.ReportTrackContact);
             };
         }
 
@@ -142,6 +144,7 @@ namespace DVSeasons.Mod
         {
             if (state == null || settings == null) return;
             if (!settings.InsectsEnabled) springLife.Dispose();
+            if (!settings.AutumnLeavesEnabled) autumnLeaves.Dispose();
             SnowPerformance.Frame();
             SetSnowMode(settings.ProceduralSnowEnabled);
             snowFootsteps.SetCoverage(settings.GroundSnowEnabled
@@ -182,7 +185,8 @@ namespace DVSeasons.Mod
                 winterWindows.Apply(state, precipitationSnowAmount * rainIntensity, snowLightFactor, settings.WinterWindowsEnabled);
             using(SnowPerformance.Measure("particles")) ApplySnowfall(precipitationSnowAmount, rainIntensity, windVelocity, snowLightFactor, settings);
             using(SnowPerformance.Measure("autumn-leaf-cover"))
-                autumnLeaves.Apply(state, windVelocity, settings.AutumnLeafLimit);
+                if (settings.AutumnLeavesEnabled)
+                    autumnLeaves.Apply(state, windVelocity, settings.AutumnLeafLimit);
             using(SnowPerformance.Measure("spring-pollinators"))
                 if (settings.InsectsEnabled)
                     springLife.Apply(state, rainIntensity, snowLightFactor, windVelocity);
@@ -195,9 +199,10 @@ namespace DVSeasons.Mod
                     settings.TextureChangeStrength)
                 : 0f;
             if (dynamicSnowEnabled) using(SnowPerformance.Measure("train-snow-trail"))
-                trainSnowTrail.Apply(winterCoverage,
+                trainSnowTrail.Apply(proceduralSurfaceSnow.HasCoverage ? proceduralSurfaceSnow.Coverage : winterCoverage,
                     settings.GroundSnowEnabled && settings.SnowParticlesEnabled,
-                    snowLightFactor,windVelocity);
+                    snowLightFactor,windVelocity,state.TemperatureCelsius,
+                    rainIntensity*(settings.ReplaceRainWithSnow ? 1-precipitationSnowAmount : 1));
             using(SnowPerformance.Measure("water")) waterIce.Apply(settings.WinterWaterIceEnabled ? winterCoverage : 0f, snowLightFactor);
             using(SnowPerformance.Measure("puddles")) winterPuddles.Apply(winterCoverage, settings.FreezeWinterPuddles);
         }
@@ -250,6 +255,7 @@ namespace DVSeasons.Mod
         public void Dispose()
         {
             ResetForSession();
+            turntableSnowSource.Dispose();
             waterIce.Dispose();
             winterPuddles.Dispose();
             snowFootsteps.Dispose();

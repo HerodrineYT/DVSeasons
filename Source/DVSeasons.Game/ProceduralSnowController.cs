@@ -38,6 +38,7 @@ namespace DVSeasons.Mod
         public Action BeforeSnowRender;
         public float GlareReduction;
         public void SetVehicleDiscovery(Func<IEnumerable<Component>> discovery) { vehicles.DiscoverVehicles=discovery; }
+        public void SetMovingSurfaceDiscovery(Func<IEnumerable<Transform>> discovery) { vehicles.DiscoverMovingRoots=discovery; }
         public void SetVehicleSnowRemaining(Func<Component,float> remaining) {vehicles.SnowRemaining=remaining;}
         public void SetVehicleSaveIdentity(Func<Component,string> identity) {vehicles.StableVehicleId=identity;}
         public void SetNativeVehicleSnow(Func<Renderer,int,bool> hasTexture) {vehicles.HasNativeSnowTexture=hasTexture;}
@@ -113,7 +114,8 @@ namespace DVSeasons.Mod
             else if (!coverageInitialized || snowfall>0.001f || coverage<=0.001f)
             { amount=coverage; coverageInitialized=true; }
             RailTracks.Advance(snowfall,Time.deltaTime);
-            var camera = Camera.main;
+            if (amount <= .001f) { Unbind(); return; }
+            var camera = PlayerManager.ActiveCamera != null ? PlayerManager.ActiveCamera : Camera.main;
             if (camera == null || camera.actualRenderingPath != RenderingPath.DeferredShading ||
                 SystemInfo.supportedRenderTargetCount < 4 || !SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.RFloat))
             {
@@ -132,9 +134,8 @@ namespace DVSeasons.Mod
                 SceneManager.sceneLoaded += SceneLoaded;
                 SceneManager.sceneUnloaded += SceneUnloaded;
                 subscribed = true;
-                near.Ready = far.Ready = distant.Ready = false;
-                Debug.Log("[DVSeasons] Procedural snow bound to deferred camera '" + camera.name +
-                    "': 256m/2048m detail maps and distant coverage to the game camera far clip.");
+                // Exposure maps describe the world, not a specific camera.
+                // UpdateExposure already refreshes them after actual relocation.
             }
             IsActive = true;
             if (amount <= 0.001f) { commands.Clear(); return; }
@@ -175,11 +176,7 @@ namespace DVSeasons.Mod
             if (material == null) material = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
             if(noiseTexture==null)
             {
-                noiseTexture=new Texture2D(128,128,TextureFormat.RGBA32,false,true)
-                { wrapMode=TextureWrapMode.Repeat,filterMode=FilterMode.Bilinear,hideFlags=HideFlags.HideAndDontSave };
-                var pixels=new Color32[128*128]; uint seed=0x71623u;
-                for(int i=0;i<pixels.Length;i++) { seed=1664525u*seed+1013904223u; byte v=(byte)(seed>>24); pixels[i]=new Color32(v,v,v,255); }
-                noiseTexture.SetPixels32(pixels);noiseTexture.Apply(false,true);
+                noiseTexture=SnowCoveragePattern.CreateTexture();
             }
             if (quad == null)
             {
