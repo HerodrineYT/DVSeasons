@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 
 namespace DVSeasons.Mod
 {
@@ -39,17 +41,19 @@ namespace DVSeasons.Mod
             vehicles.Add(vehicle);
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private bool SelectPartBatching()
         {
             return PartVehicleBatchesEnabled;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void UpdateLods(Vehicle vehicle)
         {
-            // Current is already 1. The optimizer postfix must run after this
-            // method and before RecordCore observes the Parts list.
+            if (vehicle == null) throw new ArgumentNullException(nameof(vehicle));
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private void RecordCore()
         {
             UpdateLods(vehicles[0]);
