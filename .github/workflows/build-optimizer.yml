@@ -30,7 +30,7 @@ jobs:
           set -euo pipefail
           dotnet build optimizer/OptimizerTest/OptimizerTest.csproj -c Release
           mono optimizer/OptimizerTest/bin/Release/net472/OptimizerTest.exe
-      - name: Package
+      - name: Prepare installable mod folder
         shell: bash
         run: |
           set -euo pipefail
@@ -38,15 +38,13 @@ jobs:
           cp optimizer/bin/Release/net472/DVSeasonsOptimizer.dll dist/ZZ_DVSeasonsOptimizer/
           cp optimizer/info.json dist/ZZ_DVSeasonsOptimizer/
           cat > dist/ZZ_DVSeasonsOptimizer/README.txt <<'EOF'
-          Install next to DVSeasons 0.3.3 GitHub(10) as a separate UMM mod folder.
+          Install next to DVSeasons 0.3.3 GitHub(10): extract the ZZ_DVSeasonsOptimizer folder into Derail Valley/Mods.
           The patch forces the cheaper vehicle-level snow scheduler and filters inactive LOD renderers after DVSeasons selects the current camera LOD, before the expensive renderer-state/frustum loop.
           Remove the ZZ_DVSeasonsOptimizer folder to uninstall.
           EOF
-          cd dist
-          zip -9 -r ../DVSeasonsOptimizer-0.1.0.zip ZZ_DVSeasonsOptimizer
       - uses: actions/upload-artifact@v4
         with:
-          name: DVSeasonsOptimizer-0.1.0
-          path: DVSeasonsOptimizer-0.1.0.zip
-          compression-level: 0
+          name: DVSeasonsOptimizer-0.1.0-install
+          path: dist
+          compression-level: 9
           retention-days: 2
