@@ -2,6 +2,7 @@ using HarmonyLib;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using UnityModManagerNet;
@@ -11,6 +12,8 @@ namespace DVSeasonsOptimizer
     public static class Main
     {
         private const string HarmonyId = "HerodrineYT.DVSeasons.VehicleSurfaceOptimizer";
+        private const int StatsIntervalFrames = 600;
+
         private static readonly object Gate = new object();
         private static readonly ConditionalWeakTable<object, VehicleCache> VehicleCaches =
             new ConditionalWeakTable<object, VehicleCache>();
@@ -28,12 +31,17 @@ namespace DVSeasonsOptimizer
         private static FieldInfo lodCurrentField;
         private static FieldInfo lodFilterInteriorField;
 
-        [ThreadStatic]
-        private static List<RestoreEntry> pendingRestores;
-        [ThreadStatic]
-        private static HashSet<object> filteredVehicles;
-        [ThreadStatic]
-        private static bool recordCoreActive;
+        [ThreadStatic] private static List<RestoreEntry> pendingRestores;
+        [ThreadStatic] private static HashSet<object> filteredVehicles;
+        [ThreadStatic] private static bool recordCoreActive;
+
+        private static long filterTicks;
+        private static long fullPartsSeen;
+        private static long activePartsUsed;
+        private static long selectionRebuilds;
+        private static long referenceSwaps;
+        private static long mutationFallbacks;
+        private static int recordFrames;
 
         public static bool Load(UnityModManager.ModEntry entry)
         {
@@ -42,7 +50,7 @@ namespace DVSeasonsOptimizer
             AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoad;
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
                 TryPatch(assembly);
-            Log("Loaded. Vehicle-level snow scheduling is forced and inactive LOD renderers are filtered after DVSeasons selects the current LOD.");
+            Log("Loaded. Vehicle-level scheduler + cached active-LOD buckets enabled.");
             return true;
         }
 
@@ -55,9 +63,11 @@ namespace DVSeasonsOptimizer
         {
             if (assembly == null || !string.Equals(assembly.GetName().Name, "DVSeasons", StringComparison.Ordinal))
                 return;
+
             lock (Gate)
             {
                 if (patched) return;
+
                 var registry = assembly.GetType("DVSeasons.Mod.SnowVehicleRegistry", false);
                 if (registry == null)
                 {
@@ -68,9 +78,11 @@ namespace DVSeasonsOptimizer
                 partVehicleBatchesField = FindField(registry, "PartVehicleBatchesEnabled");
                 partVehicleBatchesProperty = registry.GetProperty("PartVehicleBatchesEnabled",
                     BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+
                 var recordCore = FindMethod(registry, "RecordCore");
                 var updateLods = FindMethod(registry, "UpdateLods");
                 var selectPartBatching = FindMethod(registry, "SelectPartBatching");
+
                 if (recordCore == null || updateLods == null)
                 {
                     Log("DVSeasons internals do not match 0.3.3 GitHub(10); optimizer left inactive.");
@@ -81,15 +93,17 @@ namespace DVSeasonsOptimizer
                     prefix: new HarmonyMethod(typeof(Main), nameof(BeforeRecordCore)),
                     postfix: new HarmonyMethod(typeof(Main), nameof(AfterRecordCore)),
                     finalizer: new HarmonyMethod(typeof(Main), nameof(FinalizeRecordCore)));
+
                 harmony.Patch(updateLods,
                     postfix: new HarmonyMethod(typeof(Main), nameof(AfterUpdateLods)));
+
                 if (selectPartBatching != null)
                     harmony.Patch(selectPartBatching,
                         prefix: new HarmonyMethod(typeof(Main), nameof(ForceVehicleScheduler)));
 
                 DisablePartBatches(null);
                 patched = true;
-                Log("DVSeasons vehicle surface optimizer patches applied.");
+                Log("DVSeasons LOD bucket optimizer patches applied.");
             }
         }
 
@@ -107,9 +121,6 @@ namespace DVSeasonsOptimizer
                                        BindingFlags.Public | BindingFlags.NonPublic);
         }
 
-        // The part-level graph reduced draw commands but cost more CPU than it
-        // saved in the measured 224-car yard. Keep the cheaper vehicle stream
-        // scheduler for this test build.
         private static bool ForceVehicleScheduler(ref bool __result)
         {
             __result = false;
@@ -122,6 +133,7 @@ namespace DVSeasonsOptimizer
             {
                 if (partVehicleBatchesField != null && (partVehicleBatchesField.IsStatic || instance != null))
                     partVehicleBatchesField.SetValue(partVehicleBatchesField.IsStatic ? null : instance, false);
+
                 if (partVehicleBatchesProperty != null && partVehicleBatchesProperty.CanWrite)
                 {
                     var setter = partVehicleBatchesProperty.GetSetMethod(true);
@@ -131,29 +143,30 @@ namespace DVSeasonsOptimizer
             }
             catch
             {
-                // SelectPartBatching is patched as a fallback even if the flag
-                // changes shape in another diagnostic build.
+                // SelectPartBatching is patched as a fallback.
             }
         }
 
         private static void BeforeRecordCore(object __instance)
         {
             if (recordCoreActive) CompleteRecordCore();
+
             recordCoreActive = true;
             DisablePartBatches(__instance);
+
             if (pendingRestores == null) pendingRestores = new List<RestoreEntry>(256);
             else pendingRestores.Clear();
+
             if (filteredVehicles == null) filteredVehicles = new HashSet<object>(ReferenceComparer.Instance);
             else filteredVehicles.Clear();
         }
 
-        // DVSeasons calls UpdateLods(vehicle, camera) immediately before walking
-        // vehicle.Parts. Filtering here means Current is from this exact camera
-        // frame rather than from the previous render.
         private static void AfterUpdateLods(object __0)
         {
             if (!recordCoreActive || __0 == null) return;
             if (!filteredVehicles.Add(__0)) return;
+
+            var started = Stopwatch.GetTimestamp();
             try
             {
                 FilterVehicle(__0);
@@ -161,38 +174,136 @@ namespace DVSeasonsOptimizer
             catch (Exception exception)
             {
                 CompleteRecordCore();
-                Log("LOD filtering failed safely; original DVSeasons path retained. " +
+                Log("LOD bucket filtering failed safely; original DVSeasons path retained. " +
                     exception.GetType().Name + ": " + exception.Message);
+            }
+            finally
+            {
+                filterTicks += Stopwatch.GetTimestamp() - started;
             }
         }
 
         private static void FilterVehicle(object vehicle)
         {
             EnsureVehicleAccess(vehicle.GetType());
-            var parts = vehiclePartsField.GetValue(vehicle) as IList;
-            if (parts == null || parts.IsReadOnly) return;
+
+            var fullParts = vehiclePartsField.GetValue(vehicle) as IList;
+            if (fullParts == null || fullParts.IsReadOnly) return;
+
             var signature = Convert.ToInt32(vehicleSignatureField.GetValue(vehicle));
             var cache = VehicleCaches.GetValue(vehicle, ignored => new VehicleCache());
-            if (!cache.Ready || cache.Signature != signature || cache.FullParts.Length != parts.Count)
-                RebuildCache(cache, parts, signature);
+
+            if (!cache.Ready ||
+                cache.Signature != signature ||
+                !ReferenceEquals(cache.FullList, fullParts) ||
+                cache.FullParts.Length != fullParts.Count)
+            {
+                RebuildCache(cache, fullParts, signature);
+            }
+
             if (!cache.Ready) return;
+
+            var selectionChanged = !cache.SelectionReady;
+            for (var i = 0; i < cache.Lods.Count; i++)
+            {
+                var lod = cache.Lods[i];
+                var current = Convert.ToInt32(lodCurrentField.GetValue(lod.Instance));
+                var filterInterior = Convert.ToBoolean(lodFilterInteriorField.GetValue(lod.Instance));
+
+                if (!lod.SelectionReady || lod.Current != current || lod.FilterInterior != filterInterior)
+                    selectionChanged = true;
+
+                lod.Current = current;
+                lod.FilterInterior = filterInterior;
+                lod.SelectionReady = true;
+            }
+
+            if (selectionChanged)
+            {
+                BuildActiveParts(cache);
+                cache.SelectionReady = true;
+                selectionRebuilds++;
+            }
+
+            fullPartsSeen += cache.FullParts.Length;
+            activePartsUsed += cache.ActiveCount;
+
+            // Fast path: temporarily swap the readonly List<Part> field reference.
+            // Mono permits this through reflection and the integration fixture verifies
+            // it. This avoids clearing/re-adding the full 10k+ part list every frame.
+            var swapped = false;
+            try
+            {
+                vehiclePartsField.SetValue(vehicle, cache.ActiveList);
+                swapped = ReferenceEquals(vehiclePartsField.GetValue(vehicle), cache.ActiveList);
+            }
+            catch
+            {
+                swapped = false;
+            }
+
+            if (swapped)
+            {
+                pendingRestores.Add(RestoreEntry.ForSwap(vehicle, fullParts));
+                referenceSwaps++;
+                return;
+            }
+
+            // Conservative fallback for runtimes that refuse readonly-field swaps.
+            var snapshot = cache.FullParts;
+            pendingRestores.Add(RestoreEntry.ForMutation(fullParts, snapshot));
+            fullParts.Clear();
+            for (var i = 0; i < cache.ActiveCount; i++)
+                fullParts.Add(cache.ActiveParts[i]);
+            mutationFallbacks++;
+        }
+
+        private static void BuildActiveParts(VehicleCache cache)
+        {
+            cache.MarkGeneration++;
+            if (cache.MarkGeneration == int.MaxValue)
+            {
+                Array.Clear(cache.Marks, 0, cache.Marks.Length);
+                cache.MarkGeneration = 1;
+            }
+
+            var generation = cache.MarkGeneration;
+
+            for (var i = 0; i < cache.AlwaysIndices.Length; i++)
+                cache.Marks[cache.AlwaysIndices[i]] = generation;
 
             for (var i = 0; i < cache.Lods.Count; i++)
             {
                 var lod = cache.Lods[i];
-                lod.Current = Convert.ToInt32(lodCurrentField.GetValue(lod.Instance));
-                lod.FilterInterior = Convert.ToBoolean(lodFilterInteriorField.GetValue(lod.Instance));
+                var current = lod.Current;
+
+                if (current >= 0 && current < lod.LevelIndices.Length)
+                {
+                    var level = lod.LevelIndices[current];
+                    if (level != null)
+                        for (var j = 0; j < level.Length; j++)
+                            cache.Marks[level[j]] = generation;
+                }
+
+                if (!lod.FilterInterior)
+                {
+                    var interiors = lod.InteriorIndices;
+                    for (var j = 0; j < interiors.Length; j++)
+                        cache.Marks[interiors[j]] = generation;
+                }
             }
 
-            // Register restoration before mutating the original list so an
-            // unexpected exception can never leave a vehicle permanently filtered.
-            pendingRestores.Add(new RestoreEntry(parts, cache.FullParts));
-            parts.Clear();
-            var entries = cache.Entries;
-            for (var i = 0; i < entries.Length; i++)
+            cache.ActiveList.Clear();
+            cache.ActiveCount = 0;
+
+            for (var i = 0; i < cache.FullParts.Length; i++)
             {
-                var part = entries[i];
-                if (IsActive(part)) parts.Add(part.Instance);
+                if (cache.Marks[i] != generation) continue;
+                var part = cache.FullParts[i];
+                if (part == null) continue;
+
+                cache.ActiveParts[cache.ActiveCount++] = part;
+                cache.ActiveList.Add(part);
             }
         }
 
@@ -212,27 +323,60 @@ namespace DVSeasonsOptimizer
             RestoreAll();
             recordCoreActive = false;
             if (filteredVehicles != null) filteredVehicles.Clear();
+
+            recordFrames++;
+            if (recordFrames >= StatsIntervalFrames)
+            {
+                var ms = filterTicks * 1000.0 / Stopwatch.Frequency / Math.Max(1, recordFrames);
+                var rejected = Math.Max(0L, fullPartsSeen - activePartsUsed);
+                var ratio = fullPartsSeen > 0 ? (100.0 * rejected / fullPartsSeen) : 0.0;
+
+                Log("LOD buckets window: filter-ms/frame=" + ms.ToString("F3") +
+                    "; full-parts=" + fullPartsSeen +
+                    "; active-parts=" + activePartsUsed +
+                    "; pre-cull-rejected=" + rejected +
+                    " (" + ratio.ToString("F1") + "%)" +
+                    "; selection-rebuilds=" + selectionRebuilds +
+                    "; list-swaps=" + referenceSwaps +
+                    "; mutation-fallbacks=" + mutationFallbacks + ".");
+
+                recordFrames = 0;
+                filterTicks = 0;
+                fullPartsSeen = 0;
+                activePartsUsed = 0;
+                selectionRebuilds = 0;
+                referenceSwaps = 0;
+                mutationFallbacks = 0;
+            }
         }
 
         private static void RestoreAll()
         {
             var restores = pendingRestores;
             if (restores == null || restores.Count == 0) return;
-            for (var i = 0; i < restores.Count; i++)
+
+            for (var i = restores.Count - 1; i >= 0; i--)
             {
                 var restore = restores[i];
                 try
                 {
-                    restore.Parts.Clear();
-                    for (var j = 0; j < restore.FullParts.Length; j++)
-                        restore.Parts.Add(restore.FullParts[j]);
+                    if (restore.Swapped)
+                    {
+                        vehiclePartsField.SetValue(restore.Vehicle, restore.OriginalList);
+                    }
+                    else
+                    {
+                        restore.OriginalList.Clear();
+                        for (var j = 0; j < restore.OriginalParts.Length; j++)
+                            restore.OriginalList.Add(restore.OriginalParts[j]);
+                    }
                 }
                 catch
                 {
-                    // A streamed vehicle can disappear while rendering. The
-                    // original registry will remove it on its next discovery.
+                    // Streamed vehicles may disappear during rendering.
                 }
             }
+
             restores.Clear();
         }
 
@@ -241,6 +385,7 @@ namespace DVSeasonsOptimizer
             if (vehiclePartsField != null) return;
             vehiclePartsField = FindField(vehicleType, "Parts");
             vehicleSignatureField = FindField(vehicleType, "Signature");
+
             if (vehiclePartsField == null || vehicleSignatureField == null)
                 throw new MissingFieldException(vehicleType.FullName, "Parts/Signature");
         }
@@ -251,6 +396,7 @@ namespace DVSeasonsOptimizer
             partLodField = FindField(partType, "Lod");
             partLodMaskField = FindField(partType, "LodMask");
             partInteriorField = FindField(partType, "Interior");
+
             if (partLodField == null || partLodMaskField == null || partInteriorField == null)
                 throw new MissingFieldException(partType.FullName, "Lod/LodMask/Interior");
         }
@@ -260,6 +406,7 @@ namespace DVSeasonsOptimizer
             if (lodCurrentField != null) return;
             lodCurrentField = FindField(lodType, "Current");
             lodFilterInteriorField = FindField(lodType, "FilterInterior");
+
             if (lodCurrentField == null || lodFilterInteriorField == null)
                 throw new MissingFieldException(lodType.FullName, "Current/FilterInterior");
         }
@@ -267,48 +414,75 @@ namespace DVSeasonsOptimizer
         private static void RebuildCache(VehicleCache cache, IList parts, int signature)
         {
             cache.Ready = false;
+            cache.SelectionReady = false;
             cache.Signature = signature;
-            cache.FullParts = new object[parts.Count];
-            cache.Entries = new PartEntry[parts.Count];
-            cache.Lods.Clear();
-            var lodMap = new Dictionary<object, LodState>(ReferenceComparer.Instance);
+            cache.FullList = parts;
 
-            for (var i = 0; i < parts.Count; i++)
+            var count = parts.Count;
+            cache.FullParts = new object[count];
+            cache.ActiveParts = new object[count];
+            cache.Marks = new int[count];
+            cache.ActiveCount = 0;
+            cache.MarkGeneration = 0;
+            cache.Lods.Clear();
+
+            if (cache.ActiveList == null || cache.ActiveList.GetType() != parts.GetType())
+                cache.ActiveList = Activator.CreateInstance(parts.GetType()) as IList;
+            if (cache.ActiveList == null || cache.ActiveList.IsReadOnly)
+                throw new InvalidOperationException("Unable to create writable active Parts list.");
+            cache.ActiveList.Clear();
+
+            var always = new List<int>(count);
+            var lodMap = new Dictionary<object, LodStateBuilder>(ReferenceComparer.Instance);
+
+            for (var i = 0; i < count; i++)
             {
-                var instance = parts[i];
-                cache.FullParts[i] = instance;
-                if (instance == null)
+                var part = parts[i];
+                cache.FullParts[i] = part;
+
+                if (part == null) continue;
+
+                EnsurePartAccess(part.GetType());
+                var lodObject = partLodField.GetValue(part);
+
+                if (lodObject == null)
                 {
-                    cache.Entries[i] = new PartEntry(null, null, 0, false);
+                    always.Add(i);
                     continue;
                 }
-                EnsurePartAccess(instance.GetType());
-                var lodObject = partLodField.GetValue(instance);
-                LodState lod = null;
-                if (lodObject != null)
-                {
-                    EnsureLodAccess(lodObject.GetType());
-                    if (!lodMap.TryGetValue(lodObject, out lod))
-                    {
-                        lod = new LodState(lodObject);
-                        lodMap.Add(lodObject, lod);
-                        cache.Lods.Add(lod);
-                    }
-                }
-                cache.Entries[i] = new PartEntry(instance, lod,
-                    Convert.ToInt32(partLodMaskField.GetValue(instance)),
-                    Convert.ToBoolean(partInteriorField.GetValue(instance)));
-            }
-            cache.Ready = true;
-        }
 
-        private static bool IsActive(PartEntry part)
-        {
-            if (part.Instance == null) return false;
-            if (part.Lod == null) return true;
-            if (part.Interior && !part.Lod.FilterInterior) return true;
-            var current = part.Lod.Current;
-            return current >= 0 && current < 32 && (part.LodMask & (1 << current)) != 0;
+                EnsureLodAccess(lodObject.GetType());
+
+                LodStateBuilder builder;
+                if (!lodMap.TryGetValue(lodObject, out builder))
+                {
+                    builder = new LodStateBuilder(lodObject);
+                    lodMap.Add(lodObject, builder);
+                }
+
+                var mask = Convert.ToInt32(partLodMaskField.GetValue(part));
+                var interior = Convert.ToBoolean(partInteriorField.GetValue(part));
+
+                for (var bit = 0; bit < 32; bit++)
+                    if ((mask & (1 << bit)) != 0)
+                        builder.Levels[bit].Add(i);
+
+                if (interior)
+                    builder.Interiors.Add(i);
+            }
+
+            cache.AlwaysIndices = always.ToArray();
+
+            foreach (var builder in lodMap.Values)
+            {
+                var state = new LodState(builder.Instance);
+                for (var i = 0; i < state.LevelIndices.Length; i++)
+                    state.LevelIndices[i] = builder.Levels[i].Count == 0 ? null : builder.Levels[i].ToArray();
+                state.InteriorIndices = builder.Interiors.ToArray();
+                cache.Lods.Add(state);
+            }
+
+            cache.Ready = true;
         }
 
         private static void Log(string message)
@@ -320,66 +494,102 @@ namespace DVSeasonsOptimizer
                 {
                     var type = modEntry.GetType();
                     object logger = null;
+
                     var property = type.GetProperty("Logger", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
                     if (property != null) logger = property.GetValue(modEntry, null);
+
                     if (logger == null)
                     {
                         var field = type.GetField("Logger", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
                         if (field != null) logger = field.GetValue(modEntry);
                     }
+
                     if (logger != null)
                     {
                         var log = logger.GetType().GetMethod("Log", new[] { typeof(string) });
-                        if (log != null) { log.Invoke(logger, new object[] { message }); return; }
+                        if (log != null)
+                        {
+                            log.Invoke(logger, new object[] { message });
+                            return;
+                        }
                     }
                 }
             }
             catch
             {
             }
+
             Console.WriteLine(line);
         }
 
         private sealed class VehicleCache
         {
             public bool Ready;
+            public bool SelectionReady;
             public int Signature;
+            public IList FullList;
+            public IList ActiveList;
             public object[] FullParts = new object[0];
-            public PartEntry[] Entries = new PartEntry[0];
+            public object[] ActiveParts = new object[0];
+            public int ActiveCount;
+            public int[] Marks = new int[0];
+            public int MarkGeneration;
+            public int[] AlwaysIndices = new int[0];
             public readonly List<LodState> Lods = new List<LodState>();
         }
 
         private sealed class LodState
         {
             public readonly object Instance;
+            public readonly int[][] LevelIndices = new int[32][];
+            public int[] InteriorIndices = new int[0];
             public int Current;
             public bool FilterInterior;
-            public LodState(object instance) { Instance = instance; }
-        }
+            public bool SelectionReady;
 
-        private struct PartEntry
-        {
-            public readonly object Instance;
-            public readonly LodState Lod;
-            public readonly int LodMask;
-            public readonly bool Interior;
-            public PartEntry(object instance, LodState lod, int lodMask, bool interior)
+            public LodState(object instance)
             {
                 Instance = instance;
-                Lod = lod;
-                LodMask = lodMask;
-                Interior = interior;
+            }
+        }
+
+        private sealed class LodStateBuilder
+        {
+            public readonly object Instance;
+            public readonly List<int>[] Levels = new List<int>[32];
+            public readonly List<int> Interiors = new List<int>();
+
+            public LodStateBuilder(object instance)
+            {
+                Instance = instance;
+                for (var i = 0; i < Levels.Length; i++)
+                    Levels[i] = new List<int>();
             }
         }
 
         private struct RestoreEntry
         {
-            public readonly IList Parts;
-            public readonly object[] FullParts;
-            public RestoreEntry(IList parts, object[] fullParts)
+            public readonly bool Swapped;
+            public readonly object Vehicle;
+            public readonly IList OriginalList;
+            public readonly object[] OriginalParts;
+
+            private RestoreEntry(bool swapped, object vehicle, IList originalList, object[] originalParts)
             {
-                Parts = parts;
-                FullParts = fullParts;
+                Swapped = swapped;
+                Vehicle = vehicle;
+                OriginalList = originalList;
+                OriginalParts = originalParts;
+            }
+
+            public static RestoreEntry ForSwap(object vehicle, IList originalList)
+            {
+                return new RestoreEntry(true, vehicle, originalList, null);
+            }
+
+            public static RestoreEntry ForMutation(IList originalList, object[] originalParts)
+            {
+                return new RestoreEntry(false, null, originalList, originalParts);
             }
         }
 
