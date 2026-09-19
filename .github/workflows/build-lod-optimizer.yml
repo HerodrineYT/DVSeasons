@@ -1,0 +1,59 @@
+name: Build DVSeasons LOD Bucket Optimizer
+
+on:
+  push:
+    branches:
+      - assistant/v11-build-toolchain
+    paths:
+      - 'optimizer/**'
+      - '.github/workflows/build-lod-optimizer.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.421
+      - name: Restore
+        run: dotnet restore optimizer/DVSeasonsOptimizer.csproj
+      - name: Build optimizer
+        run: dotnet build optimizer/DVSeasonsOptimizer.csproj -c Release --no-restore
+      - name: Build fixture
+        run: dotnet build optimizer/OptimizerTest/OptimizerTest.csproj -c Release
+      - name: Install mono and run fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends mono-runtime
+          mono optimizer/OptimizerTest/bin/Release/net472/OptimizerTest.exe
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/DVSeasonsOptimizer
+          cp optimizer/bin/Release/net472/DVSeasonsOptimizer.dll dist/DVSeasonsOptimizer/
+          cp optimizer/info.json dist/DVSeasonsOptimizer/Info.json
+          cat > dist/DVSeasonsOptimizer/README.txt <<'EOF'
+DVSeasons LOD Bucket Optimizer 0.2.0
+For DVSeasons 0.3.3 GitHub(10).
+
+Caches vehicle parts by LOD membership and temporarily exposes only:
+- parts without a LOD group;
+- parts belonging to the current LOD;
+- interior parts when DVSeasons says the interior is not filtered.
+
+The cache rebuilds only when the vehicle part signature/list changes.
+Part-level batching is disabled so the cheaper vehicle-level scheduler is used.
+EOF
+          test -s dist/DVSeasonsOptimizer/DVSeasonsOptimizer.dll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DVSeasonsOptimizer-0.2.0
+          path: dist
+          compression-level: 9
+          retention-days: 3
