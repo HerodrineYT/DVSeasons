@@ -11,11 +11,13 @@ namespace OptimizerTest
             DVSeasonsOptimizer.Main.Load(new UnityModManager.ModEntry());
             var result = new SnowVehicleRegistry().Verify();
             Console.WriteLine("optimizer-fixture=" + result);
-            if (!string.Equals(result, "3:4:False:False", StringComparison.Ordinal))
+
+            if (!string.Equals(result, "3:4:False:False:True:4", StringComparison.Ordinal))
             {
-                Console.Error.WriteLine("Expected active/full/scheduler/flag = 3:4:False:False");
+                Console.Error.WriteLine("Expected active/full/scheduler/flag/restored/final = 3:4:False:False:True:4");
                 return 1;
             }
+
             return 0;
         }
     }
