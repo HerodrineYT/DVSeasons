@@ -44,8 +44,15 @@ namespace DVSeasons.Mod
             return PartVehicleBatchesEnabled;
         }
 
+        private static void UpdateLods(Vehicle vehicle)
+        {
+            // Current is already 1. The optimizer postfix must run after this
+            // method and before RecordCore observes the Parts list.
+        }
+
         private void RecordCore()
         {
+            UpdateLods(vehicles[0]);
             observedPartCount = vehicles[0].Parts.Count;
             observedPartScheduler = SelectPartBatching();
         }
