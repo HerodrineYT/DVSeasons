@@ -19,6 +19,8 @@ namespace DVSeasonsOptimizer
         private static object modEntry;
         private static bool patched;
         private static FieldInfo vehiclesField;
+        private static FieldInfo partVehicleBatchesField;
+        private static PropertyInfo partVehicleBatchesProperty;
         private static FieldInfo vehiclePartsField;
         private static FieldInfo vehicleSignatureField;
         private static FieldInfo partLodField;
@@ -61,6 +63,9 @@ namespace DVSeasonsOptimizer
                 }
 
                 vehiclesField = FindField(registry, "vehicles");
+                partVehicleBatchesField = FindField(registry, "PartVehicleBatchesEnabled");
+                partVehicleBatchesProperty = registry.GetProperty("PartVehicleBatchesEnabled",
+                    BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
                 var recordCore = FindMethod(registry, "RecordCore");
                 var selectPartBatching = FindMethod(registry, "SelectPartBatching");
                 if (vehiclesField == null || recordCore == null)
@@ -77,6 +82,7 @@ namespace DVSeasonsOptimizer
                     harmony.Patch(selectPartBatching,
                         prefix: new HarmonyMethod(typeof(Main), nameof(ForceVehicleScheduler)));
 
+                DisablePartBatches(null);
                 patched = true;
                 Log("DVSeasons vehicle surface optimizer patches applied.");
             }
@@ -105,10 +111,31 @@ namespace DVSeasonsOptimizer
             return false;
         }
 
+        private static void DisablePartBatches(object instance)
+        {
+            try
+            {
+                if (partVehicleBatchesField != null && (partVehicleBatchesField.IsStatic || instance != null))
+                    partVehicleBatchesField.SetValue(partVehicleBatchesField.IsStatic ? null : instance, false);
+                if (partVehicleBatchesProperty != null && partVehicleBatchesProperty.CanWrite)
+                {
+                    var setter = partVehicleBatchesProperty.GetSetMethod(true);
+                    if (setter != null && (setter.IsStatic || instance != null))
+                        partVehicleBatchesProperty.SetValue(setter.IsStatic ? null : instance, false, null);
+                }
+            }
+            catch
+            {
+                // SelectPartBatching is patched as a fallback even if this flag
+                // changes shape in a later DVSeasons build.
+            }
+        }
+
         private static void BeforeRecordCore(object __instance)
         {
             try
             {
+                DisablePartBatches(__instance);
                 var vehicles = vehiclesField.GetValue(__instance) as IEnumerable;
                 if (vehicles == null) return;
                 if (pendingRestores == null) pendingRestores = new List<RestoreEntry>(256);
@@ -121,7 +148,7 @@ namespace DVSeasonsOptimizer
                     var parts = vehiclePartsField.GetValue(vehicle) as IList;
                     if (parts == null || parts.IsReadOnly) continue;
                     var signature = Convert.ToInt32(vehicleSignatureField.GetValue(vehicle));
-                    var cache = VehicleCaches.GetOrCreateValue(vehicle);
+                    var cache = VehicleCaches.GetValue(vehicle, ignored => new VehicleCache());
                     if (!cache.Ready || cache.Signature != signature || cache.FullParts.Length != parts.Count)
                         RebuildCache(cache, parts, signature);
                     if (!cache.Ready) continue;
