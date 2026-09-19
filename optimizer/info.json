@@ -1,8 +1,8 @@
 {
-  "Id": "ZZ_DVSeasonsOptimizer",
-  "DisplayName": "DVSeasons Vehicle Surface Optimizer",
+  "Id": "DVSeasonsOptimizer",
+  "DisplayName": "DVSeasons LOD Bucket Optimizer",
   "Author": "HerodrineYT / OpenAI",
-  "Version": "0.1.0",
+  "Version": "0.2.0",
   "ManagerVersion": "0.32.4",
   "AssemblyName": "DVSeasonsOptimizer.dll",
   "EntryMethod": "DVSeasonsOptimizer.Main.Load",
