@@ -66,7 +66,6 @@ namespace DVSeasons.Mod
             observedPartScheduler = SelectPartBatching();
 
             // Same LOD on a second call should reuse the cached active bucket.
-            originalReferenceRestored = false;
         }
 
         public string Verify()
