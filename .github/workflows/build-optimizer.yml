@@ -43,23 +43,16 @@ jobs:
           mkdir -p dist/DVSeasonsOptimizer
           cp optimizer/bin/Release/net472/DVSeasonsOptimizer.dll dist/DVSeasonsOptimizer/
           cp optimizer/info.json dist/DVSeasonsOptimizer/Info.json
-          cat > dist/DVSeasonsOptimizer/README.txt <<'EOF'
-DVSeasons LOD Bucket Optimizer 0.2.0
-For DVSeasons 0.3.3 GitHub(10).
-
-This is the temporary verification build of the same cached-LOD-bucket algorithm intended for direct integration into DVSeasons.
-
-It:
-- caches vehicle parts by LOD membership;
-- exposes only always-visible + current-LOD parts to the hot render loop;
-- preserves interior-part behavior;
-- rebuilds buckets only when the vehicle part signature changes;
-- forces the vehicle-level scheduler;
-- restores the original Parts list after each render pass, including exception paths.
-
-Expected Player.log line every ~600 render frames:
-[DVSeasonsOptimizer] LOD buckets window: ...
-EOF
+          printf '%s\n' \
+            'DVSeasons LOD Bucket Optimizer 0.2.0' \
+            'For DVSeasons 0.3.3 GitHub(10).' \
+            '' \
+            'Temporary verification build of the cached-LOD-bucket algorithm intended for direct DVSeasons integration.' \
+            '' \
+            'Caches vehicle parts by LOD membership, exposes only always-visible plus current-LOD parts, preserves interior behavior, rebuilds buckets only on part-signature change, forces vehicle-level scheduling, and restores the original Parts list after each render pass.' \
+            '' \
+            'Expected Player.log line every ~600 render frames: [DVSeasonsOptimizer] LOD buckets window: ...' \
+            > dist/DVSeasonsOptimizer/README.txt
           test -s dist/DVSeasonsOptimizer/DVSeasonsOptimizer.dll
           test -s dist/DVSeasonsOptimizer/Info.json
 
