@@ -9,23 +9,34 @@ on:
 jobs:
   export-sdk:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - name: Install exact SDK
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.421
-      - name: Pack SDK
+      - name: Pack exact SDK only
         shell: bash
         run: |
           set -euo pipefail
-          echo "DOTNET_ROOT=$DOTNET_ROOT"
-          dotnet --info
-          tar -C "$DOTNET_ROOT" -czf "$RUNNER_TEMP/dotnet-sdk-8.0.421-linux-x64.tar.gz" .
+          sdk=8.0.421
+          runtime="$(dotnet --list-runtimes | awk '$1=="Microsoft.NETCore.App" {print $2}' | sort -V | tail -1)"
+          ref="$(find "$DOTNET_ROOT/packs/Microsoft.NETCore.App.Ref" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -1)"
+          netstandard="$(find "$DOTNET_ROOT/packs/NETStandard.Library.Ref" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -1)"
+          echo "DOTNET_ROOT=$DOTNET_ROOT sdk=$sdk runtime=$runtime ref=$ref netstandard=$netstandard"
+          cd "$DOTNET_ROOT"
+          tar -cf "$RUNNER_TEMP/dotnet-sdk-8.0.421-linux-x64.tar" \
+            dotnet \
+            "host/fxr/$runtime" \
+            "shared/Microsoft.NETCore.App/$runtime" \
+            "sdk/$sdk" \
+            "packs/Microsoft.NETCore.App.Ref/$ref" \
+            "packs/NETStandard.Library.Ref/$netstandard"
+          ls -lh "$RUNNER_TEMP/dotnet-sdk-8.0.421-linux-x64.tar"
       - name: Upload SDK
         uses: actions/upload-artifact@v4
         with:
-          name: dotnet-sdk-8.0.421-linux-x64
-          path: ${{ runner.temp }}/dotnet-sdk-8.0.421-linux-x64.tar.gz
+          name: dotnet-sdk-8.0.421-linux-x64-fast
+          path: ${{ runner.temp }}/dotnet-sdk-8.0.421-linux-x64.tar
           compression-level: 0
           retention-days: 1
