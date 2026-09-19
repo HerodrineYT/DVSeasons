@@ -20,6 +20,12 @@ jobs:
           dotnet-version: 8.0.421
       - name: Build optimizer
         run: dotnet build optimizer/DVSeasonsOptimizer.csproj -c Release
+      - name: Build and run integration fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet build optimizer/OptimizerTest/OptimizerTest.csproj -c Release
+          mono optimizer/OptimizerTest/bin/Release/net472/OptimizerTest.exe
       - name: Package
         shell: bash
         run: |
