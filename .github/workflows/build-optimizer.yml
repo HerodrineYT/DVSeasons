@@ -18,6 +18,10 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.421
+      - name: Install Mono runtime for net472 fixture
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends mono-runtime
       - name: Build optimizer
         run: dotnet build optimizer/DVSeasonsOptimizer.csproj -c Release
       - name: Build and run integration fixture
@@ -35,7 +39,7 @@ jobs:
           cp optimizer/info.json dist/ZZ_DVSeasonsOptimizer/
           cat > dist/ZZ_DVSeasonsOptimizer/README.txt <<'EOF'
           Install next to DVSeasons 0.3.3 GitHub(10) as a separate UMM mod folder.
-          The patch forces the cheaper vehicle-level snow scheduler and filters inactive LOD renderers before DVSeasons enters its expensive renderer-state/frustum loop.
+          The patch forces the cheaper vehicle-level snow scheduler and filters inactive LOD renderers after DVSeasons selects the current camera LOD, before the expensive renderer-state/frustum loop.
           Remove the ZZ_DVSeasonsOptimizer folder to uninstall.
           EOF
           cd dist
