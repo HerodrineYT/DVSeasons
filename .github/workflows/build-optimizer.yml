@@ -11,7 +11,8 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -20,28 +21,27 @@ jobs:
           dotnet-version: 8.0.421
 
       - name: Restore
-        shell: pwsh
         run: dotnet restore Tools/DVSeasonsOptimizer/DVSeasonsOptimizer.csproj
 
       - name: Build
-        shell: pwsh
         run: dotnet build Tools/DVSeasonsOptimizer/DVSeasonsOptimizer.csproj -c Release --no-restore
 
       - name: Package
-        shell: pwsh
+        shell: bash
         run: |
-          $dist = Join-Path $env:RUNNER_TEMP 'package'
-          $mod = Join-Path $dist 'DVSeasonsOptimizer'
-          New-Item -ItemType Directory -Force -Path $mod | Out-Null
-          Copy-Item 'Tools/DVSeasonsOptimizer/bin/Release/net472/DVSeasonsOptimizer.dll' $mod
-          Copy-Item 'Tools/DVSeasonsOptimizer/Info.json' $mod
-          Copy-Item 'Tools/DVSeasonsOptimizer/README.txt' $mod
-          Compress-Archive -Path $mod -DestinationPath (Join-Path $env:RUNNER_TEMP 'DVSeasonsOptimizer-0.1.1.zip') -Force
+          set -euo pipefail
+          mkdir -p dist/DVSeasonsOptimizer
+          cp Tools/DVSeasonsOptimizer/bin/Release/net472/DVSeasonsOptimizer.dll dist/DVSeasonsOptimizer/
+          cp Tools/DVSeasonsOptimizer/Info.json dist/DVSeasonsOptimizer/
+          cp Tools/DVSeasonsOptimizer/README.txt dist/DVSeasonsOptimizer/
+          cd dist
+          zip -r DVSeasonsOptimizer-0.1.1.zip DVSeasonsOptimizer
+          unzip -t DVSeasonsOptimizer-0.1.1.zip
 
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
           name: DVSeasonsOptimizer-0.1.1
-          path: ${{ runner.temp }}/DVSeasonsOptimizer-0.1.1.zip
+          path: dist/DVSeasonsOptimizer-0.1.1.zip
           compression-level: 0
           retention-days: 3
