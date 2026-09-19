@@ -1,0 +1,10 @@
+{
+  "Id": "ZZ_DVSeasonsOptimizer",
+  "DisplayName": "DVSeasons Vehicle Surface Optimizer",
+  "Author": "HerodrineYT / OpenAI",
+  "Version": "0.1.0",
+  "ManagerVersion": "0.32.4",
+  "AssemblyName": "DVSeasonsOptimizer.dll",
+  "EntryMethod": "DVSeasonsOptimizer.Main.Load",
+  "HomePage": "https://github.com/HerodrineYT/DVSeasons"
+}
