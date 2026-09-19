@@ -1,0 +1,10 @@
+{
+  "Id": "DVSeasonsOptimizer",
+  "DisplayName": "DVSeasons Optimizer",
+  "Author": "HerodrineYT / ChatGPT",
+  "Version": "0.1.1",
+  "ManagerVersion": "0.32.4",
+  "Requirements": ["DVSeasons-0.3.3"],
+  "AssemblyName": "DVSeasonsOptimizer.dll",
+  "EntryMethod": "DVSeasonsOptimizer.Main.Load"
+}
