@@ -1,11 +1,11 @@
-name: Build DVSeasons Optimizer
+name: Build DVSeasons LOD Bucket Optimizer 0.2.0
 
 on:
   push:
     branches:
       - assistant/v11-build-toolchain
     paths:
-      - 'Tools/DVSeasonsOptimizer/**'
+      - 'optimizer/**'
       - '.github/workflows/build-optimizer.yml'
   workflow_dispatch:
 
@@ -15,32 +15,58 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.421
 
-      - name: Restore
-        run: dotnet restore Tools/DVSeasonsOptimizer/DVSeasonsOptimizer.csproj
+      - name: Restore optimizer
+        run: dotnet restore optimizer/DVSeasonsOptimizer.csproj
 
-      - name: Build
-        run: dotnet build Tools/DVSeasonsOptimizer/DVSeasonsOptimizer.csproj -c Release --no-restore
+      - name: Build optimizer
+        run: dotnet build optimizer/DVSeasonsOptimizer.csproj -c Release --no-restore
 
-      - name: Prepare installable folder
+      - name: Build fixture
+        run: dotnet build optimizer/OptimizerTest/OptimizerTest.csproj -c Release
+
+      - name: Run integration fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends mono-runtime
+          mono optimizer/OptimizerTest/bin/Release/net472/OptimizerTest.exe
+
+      - name: Prepare package
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist/DVSeasonsOptimizer
-          cp Tools/DVSeasonsOptimizer/bin/Release/net472/DVSeasonsOptimizer.dll dist/DVSeasonsOptimizer/
-          cp Tools/DVSeasonsOptimizer/Info.json dist/DVSeasonsOptimizer/
-          cp Tools/DVSeasonsOptimizer/README.txt dist/DVSeasonsOptimizer/
+          cp optimizer/bin/Release/net472/DVSeasonsOptimizer.dll dist/DVSeasonsOptimizer/
+          cp optimizer/info.json dist/DVSeasonsOptimizer/Info.json
+          cat > dist/DVSeasonsOptimizer/README.txt <<'EOF'
+DVSeasons LOD Bucket Optimizer 0.2.0
+For DVSeasons 0.3.3 GitHub(10).
+
+This is the temporary verification build of the same cached-LOD-bucket algorithm intended for direct integration into DVSeasons.
+
+It:
+- caches vehicle parts by LOD membership;
+- exposes only always-visible + current-LOD parts to the hot render loop;
+- preserves interior-part behavior;
+- rebuilds buckets only when the vehicle part signature changes;
+- forces the vehicle-level scheduler;
+- restores the original Parts list after each render pass, including exception paths.
+
+Expected Player.log line every ~600 render frames:
+[DVSeasonsOptimizer] LOD buckets window: ...
+EOF
           test -s dist/DVSeasonsOptimizer/DVSeasonsOptimizer.dll
           test -s dist/DVSeasonsOptimizer/Info.json
 
       - name: Upload installable package
         uses: actions/upload-artifact@v4
         with:
-          name: DVSeasonsOptimizer-0.1.1-install
+          name: DVSeasonsOptimizer-0.2.0-install
           path: dist
           compression-level: 9
           retention-days: 3
