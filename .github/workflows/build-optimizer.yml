@@ -1,0 +1,42 @@
+name: Build DVSeasons optimizer
+
+on:
+  push:
+    branches:
+      - assistant/v11-build-toolchain
+    paths:
+      - optimizer/**
+      - .github/workflows/build-optimizer.yml
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.421
+      - name: Build optimizer
+        run: dotnet build optimizer/DVSeasonsOptimizer.csproj -c Release
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/ZZ_DVSeasonsOptimizer
+          cp optimizer/bin/Release/net472/DVSeasonsOptimizer.dll dist/ZZ_DVSeasonsOptimizer/
+          cp optimizer/info.json dist/ZZ_DVSeasonsOptimizer/
+          cat > dist/ZZ_DVSeasonsOptimizer/README.txt <<'EOF'
+          Install next to DVSeasons 0.3.3 GitHub(10) as a separate UMM mod folder.
+          The patch forces the cheaper vehicle-level snow scheduler and filters inactive LOD renderers before DVSeasons enters its expensive renderer-state/frustum loop.
+          Remove the ZZ_DVSeasonsOptimizer folder to uninstall.
+          EOF
+          cd dist
+          zip -9 -r ../DVSeasonsOptimizer-0.1.0.zip ZZ_DVSeasonsOptimizer
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DVSeasonsOptimizer-0.1.0
+          path: DVSeasonsOptimizer-0.1.0.zip
+          compression-level: 0
+          retention-days: 2
