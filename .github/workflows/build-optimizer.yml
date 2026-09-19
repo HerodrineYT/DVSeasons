@@ -1,50 +1,47 @@
-name: Build DVSeasons optimizer
+name: Build DVSeasons Optimizer
 
 on:
   push:
     branches:
       - assistant/v11-build-toolchain
     paths:
-      - optimizer/**
-      - .github/workflows/build-optimizer.yml
+      - 'Tools/DVSeasonsOptimizer/**'
+      - '.github/workflows/build-optimizer.yml'
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.421
-      - name: Install Mono runtime for net472 fixture
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore Tools/DVSeasonsOptimizer/DVSeasonsOptimizer.csproj
+
+      - name: Build
+        shell: pwsh
+        run: dotnet build Tools/DVSeasonsOptimizer/DVSeasonsOptimizer.csproj -c Release --no-restore
+
+      - name: Package
+        shell: pwsh
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends mono-runtime
-      - name: Build optimizer
-        run: dotnet build optimizer/DVSeasonsOptimizer.csproj -c Release
-      - name: Build and run integration fixture
-        shell: bash
-        run: |
-          set -euo pipefail
-          dotnet build optimizer/OptimizerTest/OptimizerTest.csproj -c Release
-          mono optimizer/OptimizerTest/bin/Release/net472/OptimizerTest.exe
-      - name: Prepare installable mod folder
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist/ZZ_DVSeasonsOptimizer
-          cp optimizer/bin/Release/net472/DVSeasonsOptimizer.dll dist/ZZ_DVSeasonsOptimizer/
-          cp optimizer/info.json dist/ZZ_DVSeasonsOptimizer/
-          cat > dist/ZZ_DVSeasonsOptimizer/README.txt <<'EOF'
-          Install next to DVSeasons 0.3.3 GitHub(10): extract the ZZ_DVSeasonsOptimizer folder into Derail Valley/Mods.
-          The patch forces the cheaper vehicle-level snow scheduler and filters inactive LOD renderers after DVSeasons selects the current camera LOD, before the expensive renderer-state/frustum loop.
-          Remove the ZZ_DVSeasonsOptimizer folder to uninstall.
-          EOF
-      - uses: actions/upload-artifact@v4
+          $dist = Join-Path $env:RUNNER_TEMP 'package'
+          $mod = Join-Path $dist 'DVSeasonsOptimizer'
+          New-Item -ItemType Directory -Force -Path $mod | Out-Null
+          Copy-Item 'Tools/DVSeasonsOptimizer/bin/Release/net472/DVSeasonsOptimizer.dll' $mod
+          Copy-Item 'Tools/DVSeasonsOptimizer/Info.json' $mod
+          Copy-Item 'Tools/DVSeasonsOptimizer/README.txt' $mod
+          Compress-Archive -Path $mod -DestinationPath (Join-Path $env:RUNNER_TEMP 'DVSeasonsOptimizer-0.1.1.zip') -Force
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
         with:
-          name: DVSeasonsOptimizer-0.1.0-install
-          path: dist
-          compression-level: 9
-          retention-days: 2
+          name: DVSeasonsOptimizer-0.1.1
+          path: ${{ runner.temp }}/DVSeasonsOptimizer-0.1.1.zip
+          compression-level: 0
+          retention-days: 3
