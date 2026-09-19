@@ -1,0 +1,31 @@
+name: Export dotnet SDK
+
+on:
+  push:
+    branches:
+      - assistant/v11-build-toolchain
+  workflow_dispatch:
+
+jobs:
+  export-sdk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Install exact SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.421
+      - name: Pack SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "DOTNET_ROOT=$DOTNET_ROOT"
+          dotnet --info
+          tar -C "$DOTNET_ROOT" -czf "$RUNNER_TEMP/dotnet-sdk-8.0.421-linux-x64.tar.gz" .
+      - name: Upload SDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-sdk-8.0.421-linux-x64
+          path: ${{ runner.temp }}/dotnet-sdk-8.0.421-linux-x64.tar.gz
+          compression-level: 0
+          retention-days: 1
