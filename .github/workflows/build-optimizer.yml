@@ -26,7 +26,7 @@ jobs:
       - name: Build
         run: dotnet build Tools/DVSeasonsOptimizer/DVSeasonsOptimizer.csproj -c Release --no-restore
 
-      - name: Package
+      - name: Prepare installable folder
         shell: bash
         run: |
           set -euo pipefail
@@ -34,14 +34,13 @@ jobs:
           cp Tools/DVSeasonsOptimizer/bin/Release/net472/DVSeasonsOptimizer.dll dist/DVSeasonsOptimizer/
           cp Tools/DVSeasonsOptimizer/Info.json dist/DVSeasonsOptimizer/
           cp Tools/DVSeasonsOptimizer/README.txt dist/DVSeasonsOptimizer/
-          cd dist
-          zip -r DVSeasonsOptimizer-0.1.1.zip DVSeasonsOptimizer
-          unzip -t DVSeasonsOptimizer-0.1.1.zip
+          test -s dist/DVSeasonsOptimizer/DVSeasonsOptimizer.dll
+          test -s dist/DVSeasonsOptimizer/Info.json
 
-      - name: Upload package
+      - name: Upload installable package
         uses: actions/upload-artifact@v4
         with:
-          name: DVSeasonsOptimizer-0.1.1
-          path: dist/DVSeasonsOptimizer-0.1.1.zip
-          compression-level: 0
+          name: DVSeasonsOptimizer-0.1.1-install
+          path: dist
+          compression-level: 9
           retention-days: 3
