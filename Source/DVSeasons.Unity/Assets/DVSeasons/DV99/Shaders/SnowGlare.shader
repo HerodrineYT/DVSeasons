@@ -9,6 +9,7 @@ Shader "Hidden/DVSeasons/SnowGlare"
             CGPROGRAM
             #pragma vertex vert_img
             #pragma fragment frag
+            #pragma multi_compile __ UNITY_SINGLE_PASS_STEREO
             #include "UnityCG.cginc"
             sampler2D _MainTex;
             float4 _MainTex_TexelSize;
@@ -16,11 +17,13 @@ Shader "Hidden/DVSeasons/SnowGlare"
             float _Strength;
             half4 frag(v2f_img i) : SV_Target
             {
-                half4 color = tex2D(_MainTex, i.uv);
+                UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(i);
+                half4 color = tex2D(_MainTex, UnityStereoTransformScreenSpaceTex(i.uv));
                 float2 depthUV = i.uv;
                 #if UNITY_UV_STARTS_AT_TOP
                 if (_MainTex_TexelSize.y < 0) depthUV.y = 1 - depthUV.y;
                 #endif
+                depthUV = UnityStereoTransformScreenSpaceTex(depthUV);
                 float depth = SAMPLE_DEPTH_TEXTURE(_CameraDepthTexture, depthUV);
                 #if defined(UNITY_REVERSED_Z)
                 if (depth <= .000001) return color;

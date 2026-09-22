@@ -21,6 +21,12 @@ namespace DVSeasons.Mod
 
         private readonly Harmony harmony = new Harmony(HarmonyId);
         private readonly ColdPowertrainController coldPowertrain = new ColdPowertrainController();
+        private readonly ColdStartHintController startHints = new ColdStartHintController();
+        public void ConfigureStarting(bool ignoreVanillaColdStarts) { coldPowertrain.IgnoreVanillaColdStarts=ignoreVanillaColdStarts; }
+        public void UpdateStartHints(bool enabled,bool localAuthority)
+        {using(SnowPerformance.Measure("cold-start-hints"))startHints.Update(enabled,localAuthority,coldPowertrain);}
+        public void ReceiveStartHints(ColdStartHintState[] hints) { startHints.Receive(hints); }
+        public ColdStartHintState[] CaptureStartHints() { return coldPowertrain.CaptureHints(); }
         private float ambientCelsius = SeasonalThermalProfile.VanillaAmbientCelsius;
         private bool installed;
         private bool simulationEnabled = true;
@@ -281,6 +287,7 @@ namespace DVSeasons.Mod
 
         public void Reset()
         {
+            startHints.Dispose();
             coldPowertrain.Reset();
             if (installed) harmony.UnpatchAll(HarmonyId);
             installed = false;

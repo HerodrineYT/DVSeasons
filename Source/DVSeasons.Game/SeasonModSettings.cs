@@ -14,6 +14,8 @@ namespace DVSeasons.Mod
         public bool HasSavedPhase;
         public float SavedPhase;
         public bool SnowParticlesEnabled = true;
+        public bool BlizzardsEnabled = true;
+        public float BlizzardRadioVolume = 1f;
         public float SnowfallDensity = 1f;
         public float SnowGlareReduction = 1f;
         // Default to the unlimited (rightmost) position of the leaf slider.
@@ -23,6 +25,8 @@ namespace DVSeasons.Mod
         public bool WinterWindowsEnabled = true;
         public KeyBinding CabHeaterHotkey = new KeyBinding();
         public bool EngineHeatingWithoutSwitch = true;
+        public bool IgnoreVanillaColdStarts;
+        public bool ColdStartHintsEnabled = true;
         // Retained only for settings-file compatibility. Snowfall now follows the
         // native WeatherDriver.RainValue exclusively.
         public float AmbientWinterSnowfall;
@@ -30,6 +34,10 @@ namespace DVSeasons.Mod
         public float GroundSnowStrength = 1f;
         // Keep the serialized key so existing preferences survive the UI rename.
         public bool ProceduralSnowEnabled = true;
+        // Local rendering preference; never clears saved/networked accumulation.
+        public bool VehicleSnowEnabled = true;
+        // Keep the serialized key; now limits only rolling stock. Zero is unlimited.
+        public int SnowObjectLimit;
         public bool NativeWinterVegetationLod = true;
         // Retained for settings-file compatibility with 0.2.3. The experimental
         // rain-impact-derived surface-snow replacement has been removed.
@@ -70,17 +78,36 @@ namespace DVSeasons.Mod
         public bool RespectExternalWetnessOverride = false;
         public float FallbackMinutesPerGameDay = 60f;
 
+        // Runtime requests this immutable value every frame. Key the cache by
+        // raw inputs so invalid values still receive exactly the constructor's
+        // normalization, without producing another snapshot on every request.
+        private SeasonSettingsSnapshot cachedSnapshot;
+        private bool snapshotAutomaticCycle, snapshotWinterAdhesion;
+        private float snapshotDays, snapshotTransition, snapshotWinterWetness;
+        private int snapshotStartingSeason;
+
         public SeasonSettingsSnapshot ToSnapshot()
         {
-            return new SeasonSettingsSnapshot(AutomaticCycle, DaysPerSeason, TransitionDays,
+            if (cachedSnapshot != null && snapshotAutomaticCycle == AutomaticCycle &&
+                snapshotDays.Equals(DaysPerSeason) && snapshotTransition.Equals(TransitionDays) &&
+                snapshotStartingSeason == StartingSeason && snapshotWinterAdhesion == WinterAdhesionEnabled &&
+                snapshotWinterWetness.Equals(WinterWetnessEquivalent)) return cachedSnapshot;
+            cachedSnapshot = new SeasonSettingsSnapshot(AutomaticCycle, DaysPerSeason, TransitionDays,
                 (SeasonKind)StartingSeason, WinterAdhesionEnabled, WinterWetnessEquivalent);
+            snapshotAutomaticCycle = AutomaticCycle; snapshotDays = DaysPerSeason;
+            snapshotTransition = TransitionDays; snapshotStartingSeason = StartingSeason;
+            snapshotWinterAdhesion = WinterAdhesionEnabled; snapshotWinterWetness = WinterWetnessEquivalent;
+            return cachedSnapshot;
         }
 
         public void Clamp()
         {
             if (CabHeaterHotkey == null) CabHeaterHotkey = new KeyBinding();
+            if (float.IsNaN(BlizzardRadioVolume) || float.IsInfinity(BlizzardRadioVolume)) BlizzardRadioVolume = 1f;
+            BlizzardRadioVolume = System.Math.Max(0f, System.Math.Min(3f, BlizzardRadioVolume));
             if (float.IsNaN(SnowGlareReduction) || float.IsInfinity(SnowGlareReduction)) SnowGlareReduction = 1f;
             SnowGlareReduction = System.Math.Max(0f, System.Math.Min(2f, SnowGlareReduction));
+            SnowObjectLimit = System.Math.Max(0, System.Math.Min(10000, SnowObjectLimit));
             // These features are part of the default visual/physics profile. They are
             // intentionally not exposed in the compact settings UI anymore.
             if (AutumnLeafLimit < 0) AutumnLeafLimit = 0;

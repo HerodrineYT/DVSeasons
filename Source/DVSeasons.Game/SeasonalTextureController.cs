@@ -25,6 +25,7 @@ namespace DVSeasons.Mod
             private readonly int maximumResolution;
             private readonly SeasonAssetBundleRepository texturePack;
             private readonly bool evergreen;
+            private readonly SeasonTextureReadback sourceReadback = new SeasonTextureReadback();
             private Color32[] basePixels;
             private Color32[][] profiles;
             private Color32[][] winterTrackProfiles;
@@ -44,6 +45,7 @@ namespace DVSeasons.Mod
                 (WinterTrackTextureStage)byte.MaxValue;
             private float pendingWinterTrackSnowAmount;
             private Color32[][] billboardMipPixels;
+            private bool denseSurfacePrepared;
             private bool failed;
 
             public SeasonalTextureSet(Texture2D source, TextureCategory category, int maximumResolution,
@@ -60,6 +62,7 @@ namespace DVSeasons.Mod
             public Texture2D Output { get; private set; }
             public bool IsReady { get { return Output != null; } }
             public bool IsFailed { get { return failed; } }
+            public bool LegacyOnly { get { return category == TextureCategory.Rail || category == TextureCategory.RoadSurface; } }
             public bool IsTrackSurface
             {
                 get
@@ -84,19 +87,28 @@ namespace DVSeasons.Mod
                     // Initialization can be deferred while Unity streams the
                     // source mip. Keep this set in the queue until the readiness
                     // guard returns true; never blend or cache a partial readback.
-                    if (!IsReady && !Initialize()) return 0;
+                    if (!IsReady)
+                    {
+                        if (!Initialize()) return 0;
+                        // Source upload is already a full texture operation. Do
+                        // not also prepare several profiles and blend this frame.
+                        return pixelBudget;
+                    }
                     if (!IsReady || (styleKey == lastStyleKey && pendingStyleKey == int.MinValue)) return 0;
                     if (pendingStyleKey == int.MinValue)
                     {
+                        // At most one previously missing profile is prepared in
+                        // this slice. Completed profiles survive subsequent seasons.
+                        if (!PrepareProfiles(state)) return pixelBudget;
                         pendingStyleKey = styleKey;
                         pendingPixelIndex = 0;
                         pendingWinterTrackStage = WinterTrackTextureStage.SnowFree;
                         pendingWinterTrackSnowAmount = Mathf.Clamp01(state.SnowAmount);
                         if (!TryPrepareWinterTrackBlend(state))
                         {
-                            pendingCurrent = profiles[(int)state.Current];
-                            pendingNext = profiles[(int)state.Next];
                             pendingTransition = GetTextureTransition(state);
+                            pendingCurrent = profiles[(int)(pendingTransition >= 1f ? state.Next : state.Current)];
+                            pendingNext = profiles[(int)(pendingTransition <= 0f ? state.Current : state.Next)];
                         }
                         pendingSeasonalStrength = Mathf.Clamp01(strength);
                         pendingWinterWeight = GetWinterWeight(state, pendingTransition);
@@ -215,13 +227,71 @@ namespace DVSeasons.Mod
                 WinterTrackTextureProfile.GetBlend(state.SnowAmount,
                     out lower, out upper, out blend);
                 pendingWinterTrackStage = blend < 0.5f ? lower : upper;
-                var snowFree = state.Current == SeasonKind.Winter
-                    ? (state.Next == SeasonKind.Winter ? basePixels : profiles[(int)state.Next])
-                    : profiles[(int)state.Current];
-                pendingCurrent = GetWinterTrackProfile(lower, snowFree);
-                pendingNext = GetWinterTrackProfile(upper, snowFree);
+                var snowFree = profiles[(int)SnowFreeSeason(state)];
+                pendingCurrent = GetWinterTrackProfile(blend >= 1f ? upper : lower, snowFree);
+                pendingNext = GetWinterTrackProfile(blend <= 0f ? lower : upper, snowFree);
                 pendingTransition = blend;
                 return true;
+            }
+
+            private static SeasonKind SnowFreeSeason(SeasonState state)
+            {
+                return state.Current == SeasonKind.Winter
+                    ? (state.Next == SeasonKind.Winter ? SeasonKind.Summer : state.Next)
+                    : state.Current;
+            }
+
+            private bool PrepareProfiles(SeasonState state)
+            {
+                if (category == TextureCategory.RoadSurface && !denseSurfacePrepared)
+                {
+                    if (!PrepareProfile(SeasonKind.Winter)) return false;
+                    PrepareDenseSurfaceSnow(Output.width, Output.height);
+                    denseSurfacePrepared = true;
+                    return false;
+                }
+                if (winterTrackProfiles != null &&
+                    (state.Current == SeasonKind.Winter || state.Next == SeasonKind.Winter))
+                {
+                    WinterTrackTextureStage lower, upper;
+                    float blend;
+                    WinterTrackTextureProfile.GetBlend(state.SnowAmount, out lower, out upper, out blend);
+                    if (blend < 1f && !PrepareTrackProfile(lower, state)) return false;
+                    if (blend > 0f && !PrepareTrackProfile(upper, state)) return false;
+                    return true;
+                }
+                var transition = GetTextureTransition(state);
+                if (transition < 1f && !PrepareProfile(state.Current)) return false;
+                if (transition > 0f && !PrepareProfile(state.Next)) return false;
+                return true;
+            }
+
+            private bool PrepareTrackProfile(WinterTrackTextureStage stage, SeasonState state)
+            {
+                if (stage == WinterTrackTextureStage.SnowFree)
+                    return PrepareProfile(SnowFreeSeason(state));
+                var index = (int)stage - 1;
+                if (winterTrackProfiles[index] != null) return true;
+                Color32[] pixels;
+                if (!texturePack.TryLoadWinterTrackPixels(source.name, stage,
+                    Output.width, Output.height, out pixels))
+                {
+                    // Preserve the original non-staged fallback for an invalid
+                    // custom track pack instead of failing the entire texture.
+                    winterTrackProfiles = null;
+                    profiles[(int)SeasonKind.Winter] = null;
+                    return false;
+                }
+                winterTrackProfiles[index] = pixels;
+                if (stage == WinterTrackTextureStage.Late) profiles[(int)SeasonKind.Winter] = pixels;
+                return false;
+            }
+
+            private bool PrepareProfile(SeasonKind season)
+            {
+                if (profiles[(int)season] != null) return true;
+                profiles[(int)season] = LoadOrCreateProfile(season, Output.width, Output.height);
+                return false;
             }
 
             private Color32[] GetWinterTrackProfile(WinterTrackTextureStage stage,
@@ -248,6 +318,7 @@ namespace DVSeasons.Mod
 
             public void Dispose()
             {
+                sourceReadback.Dispose();
                 StreamingTextureReadiness.Cancel(source);
                 DisposeOutput();
                 basePixels = null;
@@ -302,19 +373,10 @@ namespace DVSeasons.Mod
                 // A streamed source can report valid dimensions before its requested
                 // mip is resident. Keep the set pending instead of reading a stale
                 // low-resolution mip and permanently caching the wrong season.
-                StreamingTextureReadiness.ReadLease sourceLease;
-                if (!StreamingTextureReadiness.TryAcquire(source, width, height,
-                    out sourceLease)) return false;
-                try
-                {
-                    basePixels = ReadScaledPixels(source, width, height);
-                }
-                finally
-                {
-                    if (sourceLease != null) sourceLease.Dispose();
-                }
+                if(!sourceReadback.TryRead(source,width,height,out basePixels)) return false;
                 if (basePixels == null || basePixels.Length != width * height) return false;
-                winterTrackProfiles = LoadWinterTrackProfiles(width, height);
+                if (detailedTrackSurface && texturePack.HasCompleteWinterTrackSet(source.name))
+                    winterTrackProfiles = new Color32[3][];
 
                 profiles = new Color32[4][];
                 var keepSpringNeutral = category == TextureCategory.Ballast || category == TextureCategory.Bark ||
@@ -322,17 +384,9 @@ namespace DVSeasons.Mod
                     category == TextureCategory.RoadSurface;
                 var keepAutumnNeutral = category == TextureCategory.Ballast || category == TextureCategory.Bark ||
                     category == TextureCategory.Rail || category == TextureCategory.RoadSurface;
-                profiles[(int)SeasonKind.Spring] = keepSpringNeutral
-                    ? basePixels
-                    : LoadOrCreateProfile(SeasonKind.Spring, width, height);
+                profiles[(int)SeasonKind.Spring] = keepSpringNeutral ? basePixels : null;
                 profiles[(int)SeasonKind.Summer] = basePixels;
-                profiles[(int)SeasonKind.Autumn] = keepAutumnNeutral
-                    ? basePixels
-                    : LoadOrCreateProfile(SeasonKind.Autumn, width, height);
-                profiles[(int)SeasonKind.Winter] = winterTrackProfiles == null
-                    ? LoadOrCreateProfile(SeasonKind.Winter, width, height)
-                    : winterTrackProfiles[(int)WinterTrackTextureStage.Late - 1];
-                if (roadSurface) PrepareDenseSurfaceSnow(width, height);
+                profiles[(int)SeasonKind.Autumn] = keepAutumnNeutral ? basePixels : null;
                 outputPixels = new Color32[basePixels.Length];
 
                 Output = new Texture2D(width, height, TextureFormat.RGBA32,
@@ -495,6 +549,14 @@ namespace DVSeasons.Mod
             private Color32[] LoadOrCreateProfile(SeasonKind season, int width, int height)
             {
                 Color32[] packed;
+                // These profiles are generated from the native source or the
+                // bare-tree atlas. Loading another image first only discarded it.
+                if (season == SeasonKind.Spring &&
+                    (category == TextureCategory.Foliage || category == TextureCategory.Billboard))
+                    return AdjustProfile(basePixels, season, category, width, height);
+                if (season == SeasonKind.Winter && category == TextureCategory.Billboard && !evergreen &&
+                    texturePack.TryLoadBareTreeBillboardPixels(source.name, width, height, out packed))
+                    return AdjustProfile(packed, season, category, width, height);
                 if (season == SeasonKind.Winter && category == TextureCategory.Ballast &&
                     texturePack.TryLoadGenericWinterSnowPixels(width, height, out packed))
                     return packed;
@@ -502,28 +564,6 @@ namespace DVSeasons.Mod
                     return AdjustProfile(packed, season, category, width, height);
                 packed = CreateFallbackProfile(basePixels, width, height, season, source.name, category);
                 return AdjustProfile(packed, season, category, width, height);
-            }
-
-            private Color32[][] LoadWinterTrackProfiles(int width, int height)
-            {
-                if (category != TextureCategory.Ballast && category != TextureCategory.Sleeper &&
-                    category != TextureCategory.Rail)
-                    return null;
-                if (!texturePack.HasCompleteWinterTrackSet(source.name)) return null;
-
-                var staged = new Color32[3][];
-                for (var stage = WinterTrackTextureStage.Early;
-                    stage <= WinterTrackTextureStage.Late; stage++)
-                {
-                    Color32[] pixels;
-                    if (!texturePack.TryLoadWinterTrackPixels(source.name, stage,
-                        width, height, out pixels))
-                        return null;
-                    staged[(int)stage - 1] = pixels;
-                }
-                Debug.Log("[DVSeasons] Loaded three-stage winter " + category +
-                    " texture set for '" + source.name + "'.");
-                return staged;
             }
 
             private Color32[] AdjustProfile(Color32[] pixels, SeasonKind season,
@@ -543,14 +583,6 @@ namespace DVSeasons.Mod
                         adjusted[i]=new Color32((byte)Mathf.RoundToInt(r*255),
                             (byte)Mathf.RoundToInt(g*255),(byte)Mathf.RoundToInt(b*255),p.a);
                     }
-                }
-                if (category == TextureCategory.Billboard && season == SeasonKind.Winter && !evergreen)
-                {
-                    Color32[] bareTreeAtlas;
-                    if (texturePack.TryLoadBareTreeBillboardPixels(
-                        source == null ? string.Empty : source.name,
-                        width, height, out bareTreeAtlas))
-                        adjusted = bareTreeAtlas;
                 }
                 if (category != TextureCategory.Billboard) return adjusted;
                 var brightness = season == SeasonKind.Winter ? 0.65f :
@@ -662,29 +694,6 @@ namespace DVSeasons.Mod
                 Output = null;
             }
 
-            private static Color32[] ReadScaledPixels(Texture sourceTexture, int width, int height)
-            {
-                var temporary = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32,
-                    RenderTextureReadWrite.Default);
-                var previous = RenderTexture.active;
-                Texture2D readable = null;
-                try
-                {
-                    Graphics.Blit(sourceTexture, temporary);
-                    RenderTexture.active = temporary;
-                    readable = new Texture2D(width, height, TextureFormat.RGBA32, false);
-                    readable.ReadPixels(new Rect(0f, 0f, width, height), 0, 0, false);
-                    readable.Apply(false, false);
-                    return readable.GetPixels32();
-                }
-                finally
-                {
-                    RenderTexture.active = previous;
-                    RenderTexture.ReleaseTemporary(temporary);
-                    if (readable != null) UnityEngine.Object.Destroy(readable);
-                }
-            }
-
             private static Color32 Lerp(Color32 a, Color32 b, float t)
             {
                 return new Color32((byte)Mathf.RoundToInt(Mathf.Lerp(a.r, b.r, t)),
@@ -750,12 +759,11 @@ namespace DVSeasons.Mod
                         coverageOverride.Value,state.TemperatureCelsius,state.WinterWetnessEquivalent);
                 state=coverageState;
             }
-            proceduralSnow = useProceduralSnow;
             var newConfigurationKey = settings.SeasonalTextureResolution * 397 ^ settings.MaximumSeasonalTextures ^
-                (proceduralSnow ? 0x40000 : 0) ^
                 (settings.TerrainTextureChanges ? 0x10000 : 0) ^
                 (settings.VegetationTextureChanges ? 0x20000 : 0);
             if (configurationKey != int.MinValue && configurationKey != newConfigurationKey) Reset();
+            if (proceduralSnow != useProceduralSnow) SwitchSnowMode(useProceduralSnow);
             active = true;
             configurationKey = newConfigurationKey;
             if (materialScan == null && Time.realtimeSinceStartup >= nextScanTime)
@@ -803,9 +811,9 @@ namespace DVSeasons.Mod
         private void ProcessTrackUpdates(SeasonState state, SeasonModSettings settings,
             int styleKey)
         {
-            // One 64K chunk per frame keeps the additional CPU work bounded. Eight
-            // 512px track textures complete in at most 32 rendered frames, even
-            // when the normal queue is filled with 128 vegetation atlases.
+            // One 64K blend chunk per frame: eight ready 512px track textures
+            // need 32 slices. First-use readback/upload/profile preparation has
+            // separate slices, independent of the ordinary vegetation queue.
             const int trackPixelBudget = 65536;
             if (trackUpdateQueue.Count == 0) return;
             var set = trackUpdateQueue.Dequeue();
@@ -885,6 +893,7 @@ namespace DVSeasons.Mod
                 yield return 0;
                 if (renderer == null || !renderer.gameObject.scene.IsValid() ||
                     !renderer.gameObject.scene.isLoaded || !scannedSurfaceRenderers.Add(renderer.GetInstanceID())) continue;
+                if (SnowAnimalExclusion.IsAnimal(renderer)) continue;
                 var filter = renderer.GetComponent<MeshFilter>();
                 if (filter == null || filter.sharedMesh == null) continue;
                 var shared = renderer.sharedMaterials;
@@ -979,9 +988,42 @@ namespace DVSeasons.Mod
         {
             foreach (var binding in materialBindings.Values)
             {
+                if (proceduralSnow && binding.Set.LegacyOnly) continue;
                 if (binding.Material != null && binding.Set.IsReady && binding.Material.GetTexture(binding.Property) != binding.Set.Output)
                     binding.Material.SetTexture(binding.Property, binding.Set.Output);
             }
+        }
+
+        private void SwitchSnowMode(bool procedural)
+        {
+            proceduralSnow = procedural;
+            // A rendering mode is not a texture-resolution change. Keep source
+            // readbacks, winter profiles and completed outputs warm across toggles.
+            foreach (var binding in materialBindings.Values)
+            {
+                if (!binding.Set.LegacyOnly || binding.Material == null) continue;
+                if (procedural && binding.Material.GetTexture(binding.Property) == binding.Set.Output)
+                    binding.Material.SetTexture(binding.Property, binding.Original);
+            }
+            foreach (var binding in surfaceMaterials)
+            {
+                if (binding.Renderer == null) continue;
+                var shared = binding.Renderer.sharedMaterials;
+                if (binding.Slot >= shared.Length) continue;
+                var from = procedural ? binding.Seasonal : binding.Original;
+                if (shared[binding.Slot] != from) continue;
+                shared[binding.Slot] = procedural ? binding.Original : binding.Seasonal;
+                binding.Renderer.sharedMaterials = shared;
+            }
+            // The earlier procedural scan deliberately skipped legacy materials.
+            // Start a new scan immediately, without destroying common bindings.
+            if (materialScan != null) materialScan.Dispose();
+            materialScan = null;
+            scannedMaterials.Clear();
+            nextScanTime = nextBindingCheck = 0f;
+            trackUpdateQueue.Clear(); queuedTrackUpdates.Clear();
+            updateQueue.Clear(); queued.Clear();
+            foreach (var set in sets.Values) Enqueue(set);
         }
 
         private void Reset()
@@ -1024,7 +1066,7 @@ namespace DVSeasons.Mod
 
         private void Enqueue(SeasonalTextureSet set)
         {
-            if (set.IsFailed) return;
+            if (set.IsFailed || (proceduralSnow && set.LegacyOnly)) return;
             if (set.IsTrackSurface)
             {
                 if (queuedTrackUpdates.Add(set)) trackUpdateQueue.Enqueue(set);

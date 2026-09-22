@@ -552,6 +552,128 @@ namespace DVSeasons.Tests
         }
 
         [Fact]
+        public void ColdStartRuleUsesHostWhileHintPreferenceRemainsLocal()
+        {
+            var net=new TestNetwork{IsSessionActive=true,IsAuthority=false};
+            using(var session=new Session(1d,net))
+            {
+                session.Settings.IgnoreVanillaColdStarts=false;session.Settings.ColdStartHintsEnabled=false;
+                session.Runtime.Start();var state=HostWeather();state.IgnoreVanillaColdStarts=true;
+                state.ColdStarts=new[]{new ColdStartHintState{CarId="de6",Stage=ColdStartHintStage.Primer,RemainingSeconds=3,De6=true}};
+                net.Receive(state);session.Prepare(new SaveGameData());WorldStreamingInit.FinishLoading();session.Runtime.Tick(.02f);
+                Assert.False(session.Runtime.CanConfigureColdStarts);Assert.True(session.Runtime.IgnoreVanillaColdStarts);
+                Assert.True(SeasonalThermalController.IgnoreVanillaColdStarts);Assert.False(SeasonalThermalController.HintsEnabled);
+                Assert.Equal(state.ColdStarts,SeasonalThermalController.IncomingHints);
+                Assert.False(session.Settings.IgnoreVanillaColdStarts);
+                session.Settings.ColdStartHintsEnabled=true;session.Runtime.Tick(.02f);
+                Assert.True(SeasonalThermalController.HintsEnabled);
+            }
+        }
+        [Fact]
+        public void ThermalStateBeforeLoadingSurvivesWeatherOnlyPacketsAndUnload()
+        {
+            var net = new TestNetwork { IsSessionActive = true, IsAuthority = false };
+            using (var session = new Session(1d, net))
+            {
+                session.Runtime.Start();
+                var state = VehicleThermalNetworkTests.Packet();
+                net.Receive(state);
+                session.Prepare(new SaveGameData());
+                Assert.True(SeasonVisualController.ThermalUsesHost);
+                WorldStreamingInit.FinishLoading();
+                session.Runtime.Tick(.02f);
+                Assert.Equal(state.VehicleThermal, SeasonVisualController.LastThermal);
+                Assert.Equal(state.VehicleThermal, CabHeaterService.LastThermal);
+                net.Receive(HostWeather());
+                for (int i = 0; i < 100; i++) session.Runtime.Tick(.02f);
+                Assert.Equal(state.VehicleThermal, SeasonVisualController.LastThermal);
+                state.VehicleThermal = VehicleThermalNetworkState.Empty;
+                net.Receive(state); session.Runtime.Tick(.02f);
+                Assert.Empty(SeasonVisualController.LastThermal); Assert.Empty(CabHeaterService.LastThermal);
+                UnloadWatcher.RequestUnload();
+                Assert.False(SeasonVisualController.ThermalUsesHost);
+                Assert.Empty(SeasonVisualController.LastThermal);
+            }
+        }
+        [Fact]
+        public void SideSnowReceivedBeforeLoadingSurvivesResetAndOnlyAppliesOncePerSnapshot()
+        {
+            var net = new TestNetwork { IsSessionActive = true, IsAuthority = false };
+            using (var session = new Session(1d, net))
+            {
+                session.Runtime.Start();
+                var state = HostWeather();
+                state.HasSideSnowSnapshot = true;
+                state.SideSnow = new[] { new VehicleSideSnowNetworkState
+                {
+                    CarId = "loaded-later", PositiveX = .1f, NegativeX = .3f, PositiveZ = .7f, NegativeZ = .9f
+                } };
+                net.Receive(state);
+                session.Prepare(new SaveGameData());
+                Assert.True(SeasonVisualController.SideSnowNetworkAuthority);
+                WorldStreamingInit.FinishLoading();
+                Assert.Equal(0, SeasonVisualController.SideSnowApplyCount);
+                session.Runtime.Tick(.02f);
+                Assert.Equal(.7f, Assert.Single(SeasonVisualController.LastHostSideSnow).PositiveZ);
+                Assert.Equal(1, SeasonVisualController.SideSnowApplyCount);
+                for (int i = 0; i < 100; i++) session.Runtime.Tick(.02f);
+                Assert.Equal(1, SeasonVisualController.SideSnowApplyCount);
+                net.Receive(HostWeather()); // No snow history in a weather-only packet.
+                session.Runtime.Tick(.02f);
+                Assert.Equal(1, SeasonVisualController.SideSnowApplyCount);
+                Assert.Single(SeasonVisualController.LastHostSideSnow);
+                state.SideSnow = VehicleSideSnowNetworkState.Empty;
+                net.Receive(state);
+                session.Runtime.Tick(.02f);
+                Assert.Equal(2, SeasonVisualController.SideSnowApplyCount);
+                Assert.Empty(SeasonVisualController.LastHostSideSnow);
+                UnloadWatcher.RequestUnload();
+                Assert.False(SeasonVisualController.SideSnowNetworkAuthority);
+                Assert.Empty(SeasonVisualController.LastHostSideSnow);
+            }
+        }
+
+        [Fact]
+        public void SideSnowCapturesAndPeriodicPacketsAreLimitedToOnceASecond()
+        {
+            var net = new TestNetwork { IsSessionActive = true };
+            using (var session = new Session(3d, net))
+            {
+                session.Enter(new SaveGameData());
+                int captures = SeasonVisualController.SideSnowCaptureCount;
+                int broadcasts = net.PublishCount;
+                SeasonVisualController.OutgoingSideSnow = new[] { new VehicleSideSnowNetworkState
+                {
+                    CarId = "moving-car", PositiveX = .4f, NegativeX = .2f, PositiveZ = .8f, NegativeZ = .1f
+                } };
+                SeasonVisualController.OutgoingThermal = VehicleThermalNetworkTests.Packet().VehicleThermal;
+                for (int i = 0; i < 60; i++)
+                {
+                    UnityEngine.Time.realtimeSinceStartup = i / 60f;
+                    session.Runtime.Tick(1f / 60f);
+                }
+                Assert.Equal(captures, SeasonVisualController.SideSnowCaptureCount);
+                Assert.Equal(broadcasts, net.PublishCount);
+                WeatherAdapter.LastCreated.WeatherEdited();
+                Assert.Equal(broadcasts + 1, net.PublishCount);
+                Assert.False(net.LastPublished.HasSideSnowSnapshot);
+                Assert.False(net.LastPublished.HasThermalSnapshot);
+                Assert.Empty(net.LastPublished.SideSnow);
+                Assert.Equal(captures, SeasonVisualController.SideSnowCaptureCount);
+                UnityEngine.Time.realtimeSinceStartup = 2f;
+                session.Runtime.Tick(.02f);
+                Assert.Equal(captures + 1, SeasonVisualController.SideSnowCaptureCount);
+                Assert.True(net.LastPublished.HasSideSnowSnapshot);
+                Assert.True(net.LastPublished.HasThermalSnapshot);
+                Assert.Equal(SeasonVisualController.OutgoingThermal, net.LastPublished.VehicleThermal);
+                Assert.Equal(.8f, Assert.Single(net.LastPublished.SideSnow).PositiveZ);
+                for (int i = 0; i < 60; i++) WeatherAdapter.LastCreated.WeatherEdited();
+                Assert.Equal(captures + 1, SeasonVisualController.SideSnowCaptureCount);
+                Assert.False(net.LastPublished.HasSideSnowSnapshot);
+            }
+        }
+
+        [Fact]
         public void NativeWeatherRestoreCallbackReappliesHostOwnedModifiers()
         {
             var net = new TestNetwork { IsSessionActive = true, IsAuthority = false };
@@ -634,6 +756,10 @@ namespace DVSeasons.Tests
                 SeasonVisualController.ResetCount = 0;
                 SeasonVisualController.SnowRestoredFrom=SeasonVisualController.SnowWrittenTo=null;
                 SeasonVisualController.LastApplied = null;
+                SeasonVisualController.OutgoingSideSnow = SeasonVisualController.LastHostSideSnow = VehicleSideSnowNetworkState.Empty;
+                SeasonVisualController.OutgoingThermal = SeasonVisualController.LastThermal = CabHeaterService.LastThermal = VehicleThermalNetworkState.Empty;
+                SeasonVisualController.SideSnowCaptureCount = SeasonVisualController.SideSnowApplyCount = 0;
+                SeasonVisualController.SideSnowNetworkAuthority = false;
                 Settings = new SeasonModSettings
                 {
                     HasSavedPhase = true, SavedPhase = (float)phase,

@@ -1,9 +1,12 @@
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using DV;
 using DV.WeatherSystem;
 using DV.UI.LocoHUD;
+using DV.UIFramework;
 using DVSeasons.Core;
 using HarmonyLib;
 using Newtonsoft.Json.Linq;
@@ -39,11 +42,91 @@ public static class VerifyWeatherNetwork
     { return target.GetType().GetMethod(name, All).Invoke(target, args); }
     static bool SkipValidate() { return false; }
 
+    // Keep the real DV99 controller and its coroutine bodies. Only replace the
+    // Unity scheduler for this fixture, so each refresh generation is bounded
+    // and a broken client cannot hang the editor running the regression.
+    static WeatherUi scheduledUi;
+    static bool CaptureRefresh(MonoBehaviour __instance, IEnumerator __0, ref Coroutine __result)
+    {
+        if (scheduledUi == null || !ReferenceEquals(__instance, scheduledUi.Controller)) return true;
+        scheduledUi.Scheduled++;
+        if (__0.MoveNext()) scheduledUi.Pending.Enqueue(__0);
+        __result = null;
+        return false;
+    }
+    static void CountReset(PhotoModeWeatherController __instance)
+    { if (scheduledUi != null && ReferenceEquals(__instance, scheduledUi.Controller)) scheduledUi.Resets++; }
+
+    sealed class WeatherUi : IDisposable
+    {
+        readonly GameObject root;
+        public readonly PhotoModeWeatherController Controller;
+        public readonly WeatherSlider[] Sliders;
+        public readonly Queue<IEnumerator> Pending = new Queue<IEnumerator>();
+        public int Scheduled;
+        public int Resets;
+        public WeatherUi(PhotoModeWeatherSettingsProvider provider, bool seasonal = false)
+        {
+            Require(scheduledUi == null, "Weather UI fixtures must not overlap");
+            root = new GameObject("native weather controller regression"); root.SetActive(false);
+            Controller = root.AddComponent<PhotoModeWeatherController>();
+            Sliders = new WeatherSlider[2];
+            var dictionary = new Dictionary<PhotoModeWeatherController.WeatherSettingType, WeatherSlider>();
+            var limits = provider.GetMinMaxDict();
+            for (int i = 0; i < Sliders.Length; i++)
+            {
+                var holder = Child("weather setting " + i);
+                var weatherSlider = holder.AddComponent<WeatherSlider>();
+                weatherSlider.type = seasonal ? (i == 0 ? Types[2] : Types[1]) : (i == 0 ? Types[0] : Types[2]);
+                weatherSlider.slider = Child("slider " + i).AddComponent<SliderDV>();
+                weatherSlider.clearButton = Child("clear " + i).AddComponent<ButtonDV>();
+                weatherSlider.exponent = 1f;
+                weatherSlider.minMax = limits[weatherSlider.type];
+                Sliders[i] = weatherSlider;
+                dictionary.Add(weatherSlider.type, weatherSlider);
+            }
+            Controller.sliders = Sliders;
+            Set(Controller, "sliderDictionary", dictionary);
+            Set(Controller, "Provider", provider);
+            Set(Controller, "isOn", true);
+            scheduledUi = this;
+        }
+        GameObject Child(string name)
+        {
+            var child = new GameObject(name, typeof(RectTransform));
+            child.transform.SetParent(root.transform, false);
+            return child;
+        }
+        public void StepFrame()
+        {
+            // New coroutines yield immediately; they resume on the next frame,
+            // not recursively during the generation that created them.
+            int count = Pending.Count;
+            for (int i = 0; i < count; i++)
+            {
+                var routine = Pending.Dequeue();
+                if (routine.MoveNext()) Pending.Enqueue(routine);
+            }
+        }
+        public void RequireLocked(string phase)
+        {
+            foreach (var slider in Sliders)
+                Require(!slider.slider.interactable && !slider.clearButton.interactable,
+                    phase + ": client weather control became editable: " + slider.type);
+        }
+        public void Dispose()
+        {
+            Pending.Clear(); scheduledUi = null;
+            UnityEngine.Object.DestroyImmediate(root);
+        }
+    }
+
     sealed class World : IDisposable
     {
         readonly GameObject root;
         readonly FieldInfo singleton;
         readonly object previousDriver;
+        readonly GameParams gameParams;
         public readonly WeatherDriver Driver;
         public readonly WeatherPresetManager Manager;
         public readonly PhotoModeWeatherSettingsProvider Provider;
@@ -74,6 +157,9 @@ public static class VerifyWeatherNetwork
             singleton = typeof(DV.Utils.SingletonBehaviour<WeatherDriver>).GetField("_instance", All);
             previousDriver = singleton.GetValue(null); singleton.SetValue(null, Driver);
             Provider = root.AddComponent<PhotoModeWeatherSettingsProvider>();
+            gameParams = ScriptableObject.CreateInstance<GameParams>();
+            gameParams.TimeOfDayEditingAllowed = true;
+            Set(Provider, "gameParams", gameParams);
             Call(Get(Adapter, "isolation"), "Enable", Adapter);
             Manager.TimeJump += () => TimeJumps++;
         }
@@ -92,6 +178,7 @@ public static class VerifyWeatherNetwork
         {
             ((IDisposable)Adapter).Dispose(); singleton.SetValue(null, previousDriver);
             UnityEngine.Object.DestroyImmediate(root);
+            UnityEngine.Object.DestroyImmediate(gameParams);
         }
     }
 
@@ -101,6 +188,10 @@ public static class VerifyWeatherNetwork
         var fixture = new Harmony(FixtureId);
         fixture.Patch(AccessTools.Method(typeof(TOD_Sky), "OnValidate"),
             prefix: new HarmonyMethod(typeof(VerifyWeatherNetwork), "SkipValidate"));
+        fixture.Patch(AccessTools.Method(typeof(MonoBehaviour), "StartCoroutine", new[] { typeof(IEnumerator) }),
+            prefix: new HarmonyMethod(typeof(VerifyWeatherNetwork), "CaptureRefresh"));
+        fixture.Patch(AccessTools.Method(typeof(PhotoModeWeatherController), "ResetDefaultSettings"),
+            postfix: new HarmonyMethod(typeof(VerifyWeatherNetwork), "CountReset"));
         try
         {
             WeatherNetworkState manual, cleared;
@@ -140,6 +231,7 @@ public static class VerifyWeatherNetwork
                 Require(cleared.Overrides == 0, "Host reset buttons did not clear overrides in snapshot");
                 Require(host.WeatherEdits == Types.Length * 2 + 1,
                     "Host editor changes did not notify the network publisher immediately");
+                VerifyHostController(host);
                 Debug.Log("WEATHER_NETWORK_HOST_OK: actual menu edits for all nine slots; seasonal override isolation; explicit clock revision; reset buttons; host weather settings.");
             }
             // Harmony has one active game adapter, as in a real process. Execute two
@@ -174,6 +266,7 @@ public static class VerifyWeatherNetwork
         using (var client = new World(mod, false, label))
         {
             client.Receive(manual.Clone()); CheckManual(client, label + " first packet");
+            VerifyClientController(client, manual, label);
             Require(Math.Abs((client.Manager.RealDateTime - new DateTime(manual.RealDateTimeTicks)).TotalSeconds) < .01,
                 label + ": initial host date/clock was not applied");
             int initialJumps = client.TimeJumps;
@@ -226,7 +319,102 @@ public static class VerifyWeatherNetwork
                     client.Driver.ThunderValue.IsOverridden && client.Driver.ThunderValue.CurrentValue == 0f,
                     label + ": native weather packet dropped seasonal effects after host reset");
             }
+            VerifySeasonalController(client, label);
             Debug.Log("WEATHER_NETWORK_CLIENT_OK: " + label + "; all nine values, local edit rejection, native packet immediate restoration, no duplicate clock jump, complete host reset.");
+        }
+    }
+
+    static void VerifyHostController(World host)
+    {
+        using (var ui = new WeatherUi(host.Provider))
+        {
+            int edits = host.WeatherEdits;
+            ui.Controller.UpdateWeatherValues();
+            Require(ui.Pending.Count == 0 && ui.Resets == 0, "Host refresh unexpectedly reset weather");
+            Require(ui.Sliders[0].slider.interactable, "Host controller slider was locked");
+            ui.Sliders[0].Value = .37f;
+            Call(ui.Controller, "SliderChanged", ui.Sliders[0]);
+            Require(host.Driver.RainValue.IsOverridden && Mathf.Abs(host.Driver.RainValue.CurrentValue - .37f) < .0001f &&
+                ui.Pending.Count == 1, "Native host slider no longer edits weather and queues one refresh");
+            ui.StepFrame();
+            Require(ui.Pending.Count == 0 && ui.Sliders[0].clearButton.interactable,
+                "Native host edit refresh did not settle or enable reset");
+            Call(ui.Controller, "ResetDefaultSettings", ui.Sliders[0]);
+            Require(!host.Driver.RainValue.IsOverridden && ui.Pending.Count == 1,
+                "Native host reset no longer clears weather and queues one refresh");
+            ui.StepFrame();
+            Require(ui.Pending.Count == 0 && !ui.Sliders[0].clearButton.interactable && host.WeatherEdits == edits + 2,
+                "Native host reset refresh did not settle or publish both edits");
+            Debug.Log("WEATHER_UI_HOST_OK: real controller slider and reset; two finite native delayed refreshes.");
+        }
+    }
+
+    static void VerifyClientController(World client, WeatherNetworkState manual, string label)
+    {
+        using (var ui = new WeatherUi(client.Provider))
+        {
+            ui.Controller.UpdateWeatherValues();
+            int initial = ui.Pending.Count;
+            ui.StepFrame(); int first = ui.Pending.Count;
+            ui.StepFrame(); int second = ui.Pending.Count;
+            CheckManual(client, label + " native UI refresh");
+            Debug.Log("WEATHER_UI_REFRESH_QUEUE: " + label + "; " + initial + " -> " + first + " -> " + second +
+                "; resets=" + ui.Resets + ", scheduled=" + ui.Scheduled);
+            Require(initial == 0 && first == 0 && second == 0 && ui.Resets == 0 && ui.Scheduled == 0,
+                label + ": native client UI queued feedback refreshes " + initial + " -> " + first + " -> " + second +
+                "; resets=" + ui.Resets + ", scheduled=" + ui.Scheduled);
+            ui.RequireLocked(label + " initial refresh");
+            for (int i = 0; i < 12; i++)
+            {
+                client.Receive(manual.Clone());
+                ui.Controller.ToggleOn(false);
+                ui.Controller.ToggleOn(true);
+                ui.Controller.UpdateWeatherValues();
+                ui.Controller.UpdateInteractable();
+                Call(ui.Controller, "OnEnable");
+                foreach (var slider in ui.Sliders)
+                {
+                    ui.Controller.NotifyOverrideChanged(slider.type, true);
+                    ui.RequireLocked(label + " notified override");
+                    Call(ui.Controller, "ResetDefaultSettings", slider);
+                    slider.Value = .11f;
+                    Call(ui.Controller, "SliderChanged", slider);
+                }
+                ui.StepFrame();
+                ui.RequireLocked(label + " repeated reopening");
+                CheckManual(client, label + " repeated native UI interaction");
+                Require(ui.Pending.Count == 0 && ui.Scheduled == 0 && client.WeatherEdits == 0,
+                    label + ": client native UI scheduled a delayed refresh or published a local edit");
+            }
+            Debug.Log("WEATHER_UI_CLIENT_OK: " + label + "; native refresh, 12 reopen/enable cycles, host snapshots, " +
+                "override notifications, direct slider/reset calls; host overrides retained; controls locked; no queued refresh.");
+        }
+    }
+
+    static void VerifySeasonalController(World client, string label)
+    {
+        using (var ui = new WeatherUi(client.Provider, true))
+        {
+            for (int i = 0; i < 6; i++)
+            {
+                ui.Controller.UpdateWeatherValues();
+                ui.Controller.ToggleOn(false);
+                ui.Controller.ToggleOn(true);
+                Call(ui.Controller, "OnEnable");
+                foreach (var slider in ui.Sliders)
+                {
+                    ui.Controller.NotifyOverrideChanged(slider.type, true);
+                    Call(ui.Controller, "ResetDefaultSettings", slider);
+                }
+                ui.StepFrame();
+                ui.RequireLocked(label + " seasonal override refresh");
+                Require(client.Driver.WetnessValue.IsOverridden && client.Driver.WetnessValue.CurrentValue == .5f &&
+                    client.Driver.ThunderValue.IsOverridden && client.Driver.ThunderValue.CurrentValue == 0f &&
+                    ui.Pending.Count == 0 && ui.Scheduled == 0 && client.WeatherEdits == 0,
+                    label + ": native UI reset seasonal wetness/thunder or queued a feedback refresh after host reset");
+            }
+            Debug.Log("WEATHER_UI_SEASONAL_OK: " + label + "; host manual overrides cleared; owned wetness/thunder preserved; " +
+                "six native UI refresh/reopen cycles; no queued refresh.");
         }
     }
 }

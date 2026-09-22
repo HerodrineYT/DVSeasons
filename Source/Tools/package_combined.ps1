@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
@@ -46,7 +46,7 @@ $runtimeFiles = @(Get-ChildItem -LiteralPath $modRoot -Recurse -File | Where-Obj
         return $false
     }
     $relative = $_.FullName.Substring($modRoot.Length + 1).Replace('\', '/')
-    return $runtimeAliasPaths -notcontains $relative
+    return $relative -notmatch '^Textures/Seasonal/' -and $relative -ne 'Textures/winter_ballast_balanced.png' -and $runtimeAliasPaths -notcontains $relative
 })
 $sourceInputs = @(
     '.gitignore',
@@ -90,36 +90,26 @@ $sourceFiles = @(
 } | Sort-Object FullName -Unique
 
 $requiredRuntimeEntries = @(
+    'DVSeasons/Textures/autumn_leaf_atlas.png',
     'DVSeasons/info.json',
     'DVSeasons/Localization/DVSeasons.csv',
     'DVSeasons/DVSeasons.dll',
     'DVSeasons/DVSeasons.Core.dll',
     'DVSeasons/DVSeasons.Multiplayer.dll',
     'DVSeasons/AssetBundles/dvseasons_dv99',
+    'DVSeasons/AssetBundles/dvseasons_winter',
+    'DVSeasons/AssetBundles/dvseasons_tracks',
+    'DVSeasons/Overrides/README.txt',
     'DVSeasons/Audio/snow_step_1.wav',
     'DVSeasons/Audio/snow_step_2.wav',
     'DVSeasons/Audio/spring_bees.wav',
-    'DVSeasons/Textures/Seasonal/winter_track/early/RailMed_d.png',
-    'DVSeasons/Textures/Seasonal/winter_track/middle/BallastMed_d.png',
-    'DVSeasons/Textures/Seasonal/winter_track/late/BallastOld_d.png',
-    'DVSeasons/Textures/Seasonal/winter/WaterIceNormal.png',
-    'DVSeasons/Textures/Seasonal/winter/WaterIceAlbedo.png',
-    'DVSeasons/Textures/Seasonal/winter/SnowSurfaceDense.png',
-    'DVSeasons/Textures/Seasonal/winter/AsphaltRoad_01d.png',
-    'DVSeasons/Textures/Seasonal/winter/AsphaltTiling_01d.png',
-    'DVSeasons/Textures/Seasonal/winter/RoadDetail.png',
-    'DVSeasons/Textures/Seasonal/winter/Roads_LOD_01d.png',
-    'DVSeasons/Textures/Seasonal/winter/Sidewalk_01d.png',
-    'DVSeasons/Textures/Seasonal/winter/SidewalkTiles_01d.png',
-    'DVSeasons/Textures/Seasonal/winter/MB_concrete_01d.png',
-    'DVSeasons/Textures/Seasonal/winter/MB_concrete_rough_01d.png',
-    'DVSeasons/Textures/Seasonal/winter/MB_cobblestone_pavement_01d.png',
-    'DVSeasons/Textures/Seasonal/winter/MB_rooftile_red_01d.png',
-    'DVSeasons/Textures/Seasonal/winter/MB_rooftile_brown_01d.png',
-    'DVSeasons/Textures/Seasonal/winter/MB_roofsheets_rusty_01d.png',
-    'DVSeasons/Textures/Seasonal/winter/MB_roofsheets_01d_gray.png',
-    'DVSeasons/Textures/Seasonal/winter/MB_roofsheets_01d_blue.png',
-    'DVSeasons/Textures/Seasonal/winter/MB_rooftop_cinder_01d.png'
+    'DVSeasons/Audio/Blizzard/early_ru.ogg',
+    'DVSeasons/Audio/Blizzard/early_en.ogg',
+    'DVSeasons/Audio/Blizzard/hour_ru.ogg',
+    'DVSeasons/Audio/Blizzard/hour_en.ogg',
+    'DVSeasons/Audio/Blizzard/ending_ru.ogg',
+    'DVSeasons/Audio/Blizzard/ending_en.ogg',
+    'DVSeasons/Audio/Blizzard/wind.mp3'
 )
 $requiredSourceEntries = @(
     'DVSeasons/Source/DVSeasons.sln',
@@ -151,6 +141,7 @@ $requiredSourceEntries = @(
     'DVSeasons/Source/DVSeasons.Unity/Assets/DVSeasons/DV99/Shaders/PuddleIceGBuffer.shader',
     'DVSeasons/Source/DVSeasons.Unity/Assets/DVSeasons/DV99/Shaders/WaterIceOverlay.shader',
     'DVSeasons/Source/DVSeasons.Unity/Assets/DVSeasons/DV99/Shaders/ProceduralSnow.shader',
+    'DVSeasons/Source/DVSeasons.Unity/Assets/DVSeasons/DV99/Shaders/SnowHeightSampling.cginc',
     'DVSeasons/Source/DVSeasons.Unity/Assets/DVSeasons/DV99/Shaders/SnowExposure.shader',
     'DVSeasons/Source/DVSeasons.Unity/Assets/DVSeasons/DV99/winter/AsphaltRoad_01d.png',
     'DVSeasons/Source/DVSeasons.Unity/Assets/DVSeasons/DV99/winter/SidewalkTiles_01d.png',
@@ -205,15 +196,13 @@ function Assert-ReleaseEntries {
         throw "Release archive contains blocked build or script files: $($blockedFiles -join ', ')."
     }
 
-    $bundles = @($EntryNames | Where-Object { ($_ -split '/')[-1] -ieq 'dvseasons_dv99' })
-    if ($bundles.Count -ne 1) {
-        throw "Release archive must contain exactly one AssetBundle; found $($bundles.Count)."
+    $bundles = @($EntryNames | Where-Object { $_ -match '^DVSeasons/AssetBundles/dvseasons_(dv99|winter|tracks)$' })
+    if ($bundles.Count -ne 3) {
+        throw "Release archive must contain main, prepared winter and track AssetBundles; found $($bundles.Count)."
     }
-    $stagedTrackTextures = @($EntryNames | Where-Object {
-        $_ -match '^DVSeasons/Textures/Seasonal/winter_track/(early|middle|late)/[^/]+\.png$'
-    })
-    if ($stagedTrackTextures.Count -ne 20) {
-        throw "Release archive must contain 20 physical staged track textures plus four loader aliases; found $($stagedTrackTextures.Count)."
+    $looseSeasonalTextures = @($EntryNames | Where-Object { $_ -match '^DVSeasons/Textures/Seasonal/.*\.png$' })
+    if ($looseSeasonalTextures.Count -ne 0) {
+        throw 'Standard seasonal textures must be bundled, not loaded from loose PNGs.'
     }
     $packagedAliases = @($runtimeAliasPaths | ForEach-Object { "DVSeasons/$_" } | Where-Object {
         $EntryNames -contains $_

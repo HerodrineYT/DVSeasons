@@ -7,6 +7,7 @@ namespace DVSeasons.Mod
 {
     internal sealed class SeasonVisualController : IDisposable
     {
+        internal float BlizzardIntensity = 1f;
         private sealed class TerrainRecord
         {
             public Terrain Terrain;
@@ -38,6 +39,8 @@ namespace DVSeasons.Mod
         private readonly RailSnowGameSource railSnowSource = new RailSnowGameSource();
         private readonly TurntableSnowSource turntableSnowSource = new TurntableSnowSource();
         private readonly LocomotiveSnowHeatController locomotiveHeat = new LocomotiveSnowHeatController();
+        private readonly VehicleSideSnowController vehicleSideSnow = new VehicleSideSnowController();
+        private readonly Func<Component,float> sideSnowHeating;
         private readonly TenderCoalSnowController tenderCoal;
         private readonly TrainSnowTrailController trainSnowTrail;
         private readonly AutumnLeafGroundController autumnLeaves;
@@ -52,6 +55,7 @@ namespace DVSeasons.Mod
         private GameObject snowObject;
         private ParticleSystem snowSystem;
         private ParticleSystem.Particle[] snowParticleBuffer;
+        private readonly SnowfallWorldCollision snowCollisions = new SnowfallWorldCollision();
         private Material snowMaterial;
         private Texture2D snowTexture;
         private float nextTerrainScan;
@@ -67,10 +71,11 @@ namespace DVSeasons.Mod
         public SeasonVisualController(string modPath)
         {
             this.modPath = modPath ?? string.Empty;
+            sideSnowHeating = locomotiveHeat.Heating;
             snowFootsteps = new SnowFootstepAudioController(this.modPath);
             texturePack = new SeasonAssetBundleRepository(modPath);
             trainSnowTrail = new TrainSnowTrailController(texturePack);
-            autumnLeaves = new AutumnLeafGroundController(texturePack);
+            autumnLeaves = new AutumnLeafGroundController(texturePack, this.modPath);
             springLife = new SpringLifeController(this.modPath);
             winterWindows = new WinterWindowController(texturePack);
             snowGlare = new SnowGlareController(texturePack);
@@ -83,9 +88,11 @@ namespace DVSeasons.Mod
             proceduralSurfaceSnow.SetVehicleDiscovery(() => RailSnowGameSource.GetCars());
             proceduralSurfaceSnow.SetMovingSurfaceDiscovery(turntableSnowSource.GetRoots);
             proceduralSurfaceSnow.SetVehicleSnowRemaining(locomotiveHeat.Remaining);
+            proceduralSurfaceSnow.SetVehicleSideSnow(vehicleSideSnow.Amount);
             proceduralSurfaceSnow.SetVehicleSaveIdentity(source => (source as TrainCar)?.CarGUID);
             snowFootsteps.SetVehicleSnowRemaining(locomotiveHeat.RemainingAt);
             proceduralSurfaceSnow.SetNativeVehicleSnow(tenderCoal.HasSnowTexture);
+            tenderCoal.SnowObjectAllowed=proceduralSurfaceSnow.IsObjectSnowAllowed;
             proceduralSurfaceSnow.BeforeSnowRender = () =>
             {
                 proceduralSurfaceSnow.SetWorldOffset(DV.OriginShift.OriginShift.currentMove);
@@ -116,9 +123,10 @@ namespace DVSeasons.Mod
             try
             {
                 var state=SnowWorldSave.Decode(json);
-                if(state==null || state.Version!=1 || !SnowWorldSave.Unit(state.Coverage)) return;
+                if(state==null || state.Version<1 || state.Version>2 || !SnowWorldSave.Unit(state.Coverage)) return;
                 proceduralSurfaceSnow.RestoreSnow(state);
                 locomotiveHeat.Restore(state.Cars);
+                vehicleSideSnow.Restore(state.VehicleSides);
                 winterWindows.Restore(state.Cabs);
                 winterWindows.RestoreMasks(state.WindowMasks);
             }
@@ -129,6 +137,7 @@ namespace DVSeasons.Mod
             var state=new SnowWorldSave();
             proceduralSurfaceSnow.SaveSnow(state);
             locomotiveHeat.Save(state.Cars);
+            vehicleSideSnow.Save(state.VehicleSides);
             winterWindows.Save(state.Cabs);
             winterWindows.SaveMasks(state.WindowMasks);
             data.SetString("DVSeasons.SnowState",state.Encode());
@@ -138,6 +147,40 @@ namespace DVSeasons.Mod
         public float? SurfaceSnowCoverage => proceduralSurfaceSnow.HasCoverage
             ? (float?)proceduralSurfaceSnow.Coverage : null;
         public void SetNetworkSnowCoverage(float? coverage) { proceduralSurfaceSnow.SetNetworkCoverage(coverage); }
+        public VehicleSideSnowNetworkState[] CaptureSideSnowNetworkState() { return vehicleSideSnow.CaptureNetworkState(); }
+        public void ApplySideSnowNetworkState(VehicleSideSnowNetworkState[] states) { vehicleSideSnow.ApplyNetworkState(states); }
+        public void SetSideSnowNetworkAuthority(bool enabled) { vehicleSideSnow.SetNetworkAuthority(!enabled); }
+        private bool networkSimulation;
+        private readonly List<VehicleThermalNetworkState> thermalSnapshot = new List<VehicleThermalNetworkState>();
+        private readonly HashSet<string> thermalIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public void SetThermalNetworkAuthority(bool useHost) { locomotiveHeat.SetNetworkAuthority(!useHost); }
+        public void ApplyThermalNetworkState(VehicleThermalNetworkState[] states) { locomotiveHeat.ApplyNetworkState(states); }
+        public VehicleThermalNetworkState[] CaptureThermalNetworkState()
+        {
+            thermalSnapshot.Clear(); thermalIds.Clear();
+            foreach (var car in RailSnowGameSource.GetCars())
+            {
+                if (car == null || !car.IsLoco || string.IsNullOrEmpty(car.CarGUID) || !thermalIds.Add(car.CarGUID)) continue;
+                var state = VehicleThermalNetworkState.Capture(car.CarGUID, winterWindows.ClimateFor(car), locomotiveHeat.Melted(car));
+                if (state.IsValid()) thermalSnapshot.Add(state);
+                if (thermalSnapshot.Count >= VehicleThermalNetworkState.MaxVehicles) break;
+            }
+            return thermalSnapshot.Count == 0 ? VehicleThermalNetworkState.Empty : thermalSnapshot.ToArray();
+        }
+        public void UpdateSimulation(SeasonState state, float snowfall, Vector3 wind, float seconds,
+            bool multiplayer, SeasonModSettings settings)
+        {
+            networkSimulation = multiplayer;
+            using (SnowPerformance.Measure("cab-climate")) winterWindows.UpdateClimate(state, multiplayer);
+            if (!multiplayer && !settings.ProceduralSnowEnabled) return;
+            // Local rendering switches must not stop the host simulating snow
+            // for other players or clear a client's confirmed melt history.
+            float coverage = multiplayer ? state.SnowAmount : settings.GroundSnowEnabled ? state.SnowAmount : 0;
+            float falling = multiplayer || settings.ReplaceRainWithSnow ? snowfall : 0;
+            locomotiveHeat.Update(falling, coverage, seconds);
+            using (SnowPerformance.Measure("vehicle-side-snow"))
+                vehicleSideSnow.Update(falling, coverage, state.TemperatureCelsius, seconds, sideSnowHeating, wind);
+        }
 
         public void Apply(SeasonState state, float precipitationSnowAmount, float rainIntensity, Vector3 windVelocity,
             float snowLightFactor, SeasonModSettings settings)
@@ -145,8 +188,11 @@ namespace DVSeasons.Mod
             if (state == null || settings == null) return;
             if (!settings.InsectsEnabled) springLife.Dispose();
             if (!settings.AutumnLeavesEnabled) autumnLeaves.Dispose();
-            SnowPerformance.Frame();
+            SnowPerformance.Frame(state);
+            SnowRenderBenchmark.SetSeason(state.Current);
             SetSnowMode(settings.ProceduralSnowEnabled);
+            proceduralSurfaceSnow.SetVehicleSnowEnabled(settings.VehicleSnowEnabled);
+            proceduralSurfaceSnow.SetObjectLimit(settings.ProceduralSnowEnabled ? settings.SnowObjectLimit : 0);
             snowFootsteps.SetCoverage(settings.GroundSnowEnabled
                 ? state.SnowAmount*settings.GroundSnowStrength*settings.TextureChangeStrength : 0f,
                 settings.GroundSnowEnabled);
@@ -167,17 +213,14 @@ namespace DVSeasons.Mod
             {
                 proceduralSurfaceSnow.SetWorldOffset(DV.OriginShift.OriginShift.currentMove);
                 proceduralSurfaceSnow.SetWeather(settings.ReplaceRainWithSnow ? precipitationSnowAmount * rainIntensity : 0f);
-                locomotiveHeat.Update(settings.ReplaceRainWithSnow?precipitationSnowAmount*rainIntensity:0f,
-                    settings.GroundSnowEnabled?state.SnowAmount:0f,Time.deltaTime);
                 using(SnowPerformance.Measure("snow-prepare")) proceduralSurfaceSnow.Apply(settings.GroundSnowEnabled
                     ? state.SnowAmount * settings.GroundSnowStrength * settings.TextureChangeStrength : 0f, true);
             }
-            using(SnowPerformance.Measure("seasonal-textures")) seasonalTextures.Apply(state, settings, proceduralSurfaceSnow.IsActive,
-                proceduralSurfaceSnow.IsActive ? (float?)proceduralSurfaceSnow.Coverage : null);
+            ApplySeasonalTextures(state, settings);
             using(SnowPerformance.Measure("terrain-materials")) microSplatTerrain.Apply(state, settings, proceduralSurfaceSnow.IsActive,
                 proceduralSurfaceSnow.IsActive ? (float?)proceduralSurfaceSnow.Coverage : null);
             using(SnowPerformance.Measure("terrain-properties")) ApplyTerrains(state, settings);
-            using(SnowPerformance.Measure("tender-coal")) tenderCoal.Apply(settings.GroundSnowEnabled && settings.SeasonalTexturesEnabled && settings.TerrainTextureChanges
+            using(SnowPerformance.Measure("tender-coal")) tenderCoal.Apply(settings.VehicleSnowEnabled && settings.GroundSnowEnabled && settings.SeasonalTexturesEnabled && settings.TerrainTextureChanges
                 ? (proceduralSurfaceSnow.IsActive?proceduralSurfaceSnow.Coverage:state.SnowAmount*settings.GroundSnowStrength*settings.TextureChangeStrength):0f,
                 dynamicSnowEnabled ? (Func<Component,float>)locomotiveHeat.Remaining : null);
             ApplyRainCrossfade(settings.ReplaceRainWithSnow ? precipitationSnowAmount : 0f);
@@ -214,7 +257,7 @@ namespace DVSeasons.Mod
             if (enabled) return;
             proceduralSurfaceSnow.Apply(0f, false);
             railSnowSource.Reset();
-            locomotiveHeat.Reset(); // Footsteps must see the seasonal snow again.
+            if (!networkSimulation) locomotiveHeat.Reset(); // Local mode restores seasonal footsteps.
             trainSnowTrail.Dispose();
             if (snowTerrainGrid != null)
                 snowTerrainGrid.TerrainsMoved -= proceduralSurfaceSnow.InvalidateGeometry;
@@ -241,7 +284,7 @@ namespace DVSeasons.Mod
             if (startupStage == 2)
             {
                 using (SnowPerformance.Measure("startup-seasonal-textures"))
-                    seasonalTextures.Apply(state, settings, false, null);
+                    ApplySeasonalTextures(state, settings);
                 startupStage = 3;
                 return false;
             }
@@ -250,6 +293,18 @@ namespace DVSeasons.Mod
             startupStage = 4;
             Debug.Log("[DVSeasons] Staged seasonal visual initialization complete.");
             return false;
+        }
+
+        private void ApplySeasonalTextures(SeasonState state, SeasonModSettings settings)
+        {
+            // A dry season, async shader warmup or temporary camera change does
+            // not switch the user's snow system. Using IsActive here previously
+            // prepared legacy road/roof pixels, then destroyed every texture set
+            // and built it again as soon as procedural snow became active.
+            using(SnowPerformance.Measure("seasonal-textures"))
+                seasonalTextures.Apply(state, settings, settings.ProceduralSnowEnabled,
+                    settings.ProceduralSnowEnabled && proceduralSurfaceSnow.HasCoverage
+                        ? (float?)proceduralSurfaceSnow.Coverage : null);
         }
 
         public void Dispose()
@@ -274,6 +329,8 @@ namespace DVSeasons.Mod
             proceduralSurfaceSnow.Dispose(); railSnowSource.Reset();
             dynamicSnowEnabled = false;
             tenderCoal.Dispose();locomotiveHeat.Reset();
+            vehicleSideSnow.Reset();
+            networkSimulation = false; thermalSnapshot.Clear(); thermalIds.Clear();
             trainSnowTrail.Dispose();
             autumnLeaves.Dispose();
             springLife.Dispose();
@@ -303,6 +360,7 @@ namespace DVSeasons.Mod
             snowObject = null;
             snowSystem = null;
             snowParticleBuffer = null;
+            snowCollisions.Clear();
             snowMaterial = null;
             snowTexture = null;
             nextTerrainScan = 0f;
@@ -495,7 +553,7 @@ namespace DVSeasons.Mod
             // old ambient minimum could create snowfall in otherwise dry weather.
             var precipitation = rainIntensity;
             var intensity = settings.SnowParticlesEnabled
-                ? visibility * precipitation * settings.SnowfallDensity
+                ? visibility * precipitation * settings.SnowfallDensity * BlizzardIntensity
                 : 0f;
             if (intensity <= 0.0001f)
             {
@@ -509,6 +567,9 @@ namespace DVSeasons.Mod
                 return;
             }
             EnsureSnowSystem();
+            var stormMain = snowSystem.main;
+            int desiredCapacity = BlizzardIntensity > 1f ? 22500 : 7500;
+            if (stormMain.maxParticles != desiredCapacity) stormMain.maxParticles = desiredCapacity;
             var camera = Camera.main;
             if (camera == null) return;
             ApplySnowWind(windVelocity);
@@ -522,7 +583,7 @@ namespace DVSeasons.Mod
                     snowSystem.Stop(false, ParticleSystemStopBehavior.StopEmittingAndClear);
                 return;
             }
-            InterceptWindowSnow(camera, settings.WinterWindowsEnabled);
+            InterceptSnow(camera, settings.WinterWindowsEnabled);
             PositionSnowEmitter(camera, windVelocity);
             var emission = snowSystem.emission;
             emission.rateOverTimeMultiplier = 1600f * intensity;
@@ -590,11 +651,11 @@ namespace DVSeasons.Mod
             if (snowMaterial.HasProperty("_Color")) snowMaterial.SetColor("_Color", tint);
         }
 
-        private void InterceptWindowSnow(Camera camera, bool enabled)
+        private void InterceptSnow(Camera camera, bool windowsEnabled)
         {
             float now = Time.time;
-            if (!enabled || snowSystem == null || now-lastWindowParticleCheck < .05f) return;
-            float dt = Mathf.Clamp(now-lastWindowParticleCheck, .01f, .1f);
+            if (snowSystem == null || now-lastWindowParticleCheck < .05f) return;
+            float dt = Mathf.Clamp(now-lastWindowParticleCheck, .01f, .5f);
             lastWindowParticleCheck = now;
             int count = snowSystem.particleCount;
             if (count == 0) return;
@@ -602,12 +663,22 @@ namespace DVSeasons.Mod
                 snowParticleBuffer = new ParticleSystem.Particle[Mathf.NextPowerOfTwo(count)];
             count = snowSystem.GetParticles(snowParticleBuffer);
             bool changed = false;
+            var cameraPosition = camera.transform.position;
+            snowCollisions.Prepare(cameraPosition);
             for (int i=0;i<count;i++)
             {
                 var p=snowParticleBuffer[i];
-                if ((p.position-camera.transform.position).sqrMagnitude > 225) continue;
+                float distanceSquared = (p.position-cameraPosition).sqrMagnitude;
+                if (distanceSquared > SnowfallWorldCollision.ParticleRadius * SnowfallWorldCollision.ParticleRadius) continue;
                 var velocity=p.totalVelocity;
-                if (!winterWindows.Collide(p.position-velocity*dt,p.position,dt)) continue;
+                var previous = p.position - velocity * dt;
+                bool windowHit = windowsEnabled && distanceSquared <= 225 && winterWindows.Collide(previous,p.position,dt);
+                // The emitter is a volume: a newly born flake can start inside a
+                // room or on the sheltered side of a wall. Check its incoming
+                // weather path as well, rather than waiting for a wall crossing.
+                bool newborn = p.startLifetime - p.remainingLifetime <= dt + .01f;
+                if (newborn && velocity.sqrMagnitude > .001f) previous = p.position - velocity.normalized * 32f;
+                if (!windowHit && !snowCollisions.Blocked(previous,p.position)) continue;
                 p.remainingLifetime=0;snowParticleBuffer[i]=p;changed=true;
             }
             if(changed) snowSystem.SetParticles(snowParticleBuffer,count);
@@ -680,10 +751,8 @@ namespace DVSeasons.Mod
             var rotation = snowSystem.rotationOverLifetime;
             rotation.enabled = true;
             rotation.z = new ParticleSystem.MinMaxCurve(-0.55f, 0.55f);
-            // Per-particle world collision was the largest continuous CPU cost. The
-            // flakes already live only a few seconds in a camera-relative volume, so
-            // collision adds little visually while testing thousands of particles
-            // against terrain and trains every frame.
+            // Use the cached nearby-collider interceptor instead of running a
+            // global PhysX collision query for every distant particle every frame.
             var collision = snowSystem.collision;
             collision.enabled = false;
             var renderer = snowObject.GetComponent<ParticleSystemRenderer>();

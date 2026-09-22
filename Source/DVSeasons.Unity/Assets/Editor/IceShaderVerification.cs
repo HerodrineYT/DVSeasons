@@ -25,6 +25,7 @@ namespace DVSeasons.AssetBundleBuild
                 RenderTextureReadWrite.Linear);
             var specular = new RenderTexture(size, size, 0, RenderTextureFormat.ARGB32,
                 RenderTextureReadWrite.Linear);
+            var smoothness = new RenderTexture(size,size,0,RenderTextureFormat.R8,RenderTextureReadWrite.Linear);
             var quad = new Mesh
             {
                 vertices = new[] { new Vector3(-1,-1,0), new Vector3(1,-1,0),
@@ -49,12 +50,13 @@ namespace DVSeasons.AssetBundleBuild
                     original.SetPixel(x, y, new Color(0.15f + y * 0.025f, 0.2f, 0.3f, 0.4f));
                     mask.SetPixel(x, y, x > size / 2 ? Color.white : Color.black);
                 }
-                original.Apply(); mask.Apply(); diffuse.Create(); specular.Create();
+                original.Apply(); mask.Apply(); diffuse.Create(); specular.Create(); smoothness.Create();
                 foreach (var amount in new[] { 0f, 0.5f, 1f })
                 {
                     commands.Clear();
                     commands.SetGlobalTexture("_DVOriginalDiffuse", original);
-                    commands.SetGlobalTexture("_DVOriginalSpecular", original);
+                    commands.Blit(original,smoothness,material,1);
+                    commands.SetGlobalTexture("_DVOriginalSpecular", smoothness);
                     commands.SetGlobalTexture("_WetDecalSaturationMask", mask);
                     commands.SetGlobalTexture("_CameraDepthTexture", Texture2D.whiteTexture);
                     commands.SetGlobalTexture("_IceTex", Texture2D.whiteTexture);
@@ -64,7 +66,7 @@ namespace DVSeasons.AssetBundleBuild
                     // Preload target so discarded dry pixels retain native data.
                     commands.Blit(original, specular);
                     commands.SetRenderTarget(specular);
-                    commands.DrawMesh(quad, Matrix4x4.identity, material);
+                    commands.DrawMesh(quad, Matrix4x4.identity, material,0,0);
                     Graphics.ExecuteCommandBuffer(commands);
                     RenderTexture.active = specular;
                     var readback = new Texture2D(size, size, TextureFormat.RGBA32, false, true);
@@ -106,6 +108,7 @@ namespace DVSeasons.AssetBundleBuild
                 UnityEngine.Object.DestroyImmediate(quad);
                 UnityEngine.Object.DestroyImmediate(diffuse);
                 UnityEngine.Object.DestroyImmediate(specular);
+                UnityEngine.Object.DestroyImmediate(smoothness);
             }
         }
     }

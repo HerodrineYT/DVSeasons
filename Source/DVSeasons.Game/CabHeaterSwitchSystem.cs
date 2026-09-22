@@ -249,6 +249,7 @@ namespace DVSeasons.Mod
             container.transform.SetParent(interior, false);
             MeshRenderer hiddenRenderer = null;
             MeshFilter changedBody = null;
+            CabHeaterSwitchMarker materialOwner = null;
             try
             {
                 var clone = UnityEngine.Object.Instantiate(template, container.transform, false);
@@ -268,6 +269,7 @@ namespace DVSeasons.Mod
                     UnityEngine.Object.DestroyImmediate(holder);
                 controlRoot.gameObject.AddComponent<CabHeaterControlNameHolder>();
                 var marker = controlRoot.gameObject.AddComponent<CabHeaterSwitchMarker>();
+                materialOwner = marker;
                 var modelFilter = modelRoot.GetComponent<MeshFilter>();
                 var modelRenderer = modelRoot.GetComponent<MeshRenderer>();
                 if (modelFilter == null || modelRenderer == null)
@@ -313,6 +315,11 @@ namespace DVSeasons.Mod
                     FitToggleCollider(toggle, controlRoot, modelFilter.sharedMesh.bounds);
                 }
 
+                // The loaded cab may already use temporary winter materials. The
+                // new renderer is not in that subsystem's current binding list,
+                // so borrowing those materials would leave it pink on Release.
+                marker.OwnVisualMaterials(modelRenderer);
+
                 var desiredPosition = geometry == null ? nativeVisual.position :
                     nativeVisual.TransformPoint(geometry.Pivot);
                 var desiredRotation = nativeVisual.rotation;
@@ -345,6 +352,8 @@ namespace DVSeasons.Mod
             {
                 if (hiddenRenderer != null) hiddenRenderer.enabled = true;
                 if (changedBody != null) changedBody.sharedMesh = originalMesh;
+                // OnDestroy is not guaranteed for a never-activated hierarchy.
+                if (materialOwner != null) materialOwner.ReleaseVisualMaterials();
                 if (container != null) UnityEngine.Object.Destroy(container);
                 throw;
             }
@@ -555,6 +564,48 @@ namespace DVSeasons.Mod
     {
         private CabHeaterSwitchSystem owner;
         private string carId;
+        private Material[] visualMaterials;
+
+        internal void OwnVisualMaterials(Renderer renderer)
+        {
+            var sources = renderer.sharedMaterials;
+            visualMaterials = new Material[sources.Length];
+            for (int i = 0; i < sources.Length; i++)
+            {
+                var source = sources[i];
+                if (source == null) throw new InvalidOperationException("Heater visual material is unavailable.");
+                var material = new Material(source)
+                {
+                    name = source.name + " [DVSeasons cab control]",
+                    hideFlags = HideFlags.HideAndDontSave
+                };
+                visualMaterials[i] = material;
+                // This variant is exclusively a replacement for Standard. Keep
+                // the current paint/texture values, but not its temporary car ID
+                // or dependence on the seasonal GPU buffers. Later snow discovery
+                // can register this renderer normally and restore this owned copy.
+                if (source.shader != null && source.shader.name == "Hidden/DVSeasons/SnowVehicleStandard")
+                {
+                    var shader = Shader.Find("Standard");
+                    if (shader == null) throw new InvalidOperationException("Stock Standard shader is unavailable.");
+                    material.shader = shader;
+                    material.shaderKeywords = source.shaderKeywords;
+                    material.renderQueue = source.renderQueue;
+                }
+            }
+            renderer.sharedMaterials = visualMaterials;
+        }
+
+        internal void ReleaseVisualMaterials()
+        {
+            if (visualMaterials != null) foreach (var material in visualMaterials)
+                if (material != null)
+                {
+                    if (Application.isPlaying) Destroy(material);
+                    else DestroyImmediate(material);
+                }
+            visualMaterials = null;
+        }
 
         internal void Bind(CabHeaterSwitchSystem newOwner, string newCarId)
         {
@@ -582,7 +633,13 @@ namespace DVSeasons.Mod
         {
             var currentOwner = owner;
             owner = null;
-            if (currentOwner != null) currentOwner.HandleMarkerDestroyed(this, carId);
+            try { if (currentOwner != null) currentOwner.HandleMarkerDestroyed(this, carId); }
+            finally
+            {
+                // Also runs when setup failed before Bind, or the streamed cab
+                // disappears without the service getting another Ensure call.
+                ReleaseVisualMaterials();
+            }
         }
     }
 

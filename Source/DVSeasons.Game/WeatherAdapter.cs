@@ -64,7 +64,7 @@ namespace DVSeasons.Mod
             {
                 if (driver == null) return Vector3.zero;
                 var degrees = driver.WindDirection.CurrentValue * Mathf.Deg2Rad;
-                var speed = Mathf.Clamp(driver.WindSpeed.CurrentValue, 0f, 7f) * 2.1f;
+                var speed = blizzardOwned ? 20f : Mathf.Clamp(driver.WindSpeed.CurrentValue, 0f, 7f) * 2.1f;
                 return new Vector3(-Mathf.Sin(degrees), 0f, -Mathf.Cos(degrees)) * speed;
             }
         }
@@ -267,6 +267,8 @@ namespace DVSeasons.Mod
 
         public void ResetForSession()
         {
+            ApplyBlizzard(false);
+            blizzardOwned = false;
             ResetNetworkWeather();
             climate.Reset();
             ReleaseWetnessOverride();

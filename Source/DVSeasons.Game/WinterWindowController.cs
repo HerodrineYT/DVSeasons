@@ -17,6 +17,11 @@ namespace DVSeasons.Mod
         private static WinterWindowController active;
         public static float CabinTemperature(TrainCar car)
         {
+            if (CabHeating.UsesNetworkClimate)
+            {
+                var remote = CabHeating.NetworkClimate(car);
+                return remote != null && remote.IsInitialized ? remote.CabinTemperature : float.NaN;
+            }
             Cab cab;
             return active != null && car != null && active.lastClimate > 0 &&
                 active.cabs.TryGetValue(car, out cab) ? cab.Climate.CabinTemperature : float.NaN;
@@ -24,6 +29,8 @@ namespace DVSeasons.Mod
         private sealed class Cab
         {
             public TrainCar Car;
+            public string Id;
+            public bool NetworkDriven;
             public WindowWinterClimate Climate = new WindowWinterClimate();
             public ControlImplBase Heater;
             public DoorsAndWindowsController[] Openings;
@@ -75,6 +82,23 @@ namespace DVSeasons.Mod
         private readonly HashSet<Window> known = new HashSet<Window>();
         private readonly HashSet<MeshRenderer> boundVisuals = new HashSet<MeshRenderer>();
         private readonly List<TrainCar> removed = new List<TrainCar>();
+        private struct NearbyCar { public TrainCar Car; public float Distance; }
+        private sealed class NearbyCarComparer : IComparer<NearbyCar>
+        {
+            public static readonly NearbyCarComparer Instance = new NearbyCarComparer();
+            public int Compare(NearbyCar left, NearbyCar right) { return left.Distance.CompareTo(right.Distance); }
+        }
+        private sealed class WindowComparer : IComparer<Window>
+        {
+            public static readonly WindowComparer Instance = new WindowComparer();
+            public int Compare(Window left, Window right)
+            { return (right != null && right.simulate).CompareTo(left != null && left.simulate); }
+        }
+        private readonly List<NearbyCar> nearbyWindowCars = new List<NearbyCar>();
+        private readonly List<TrainCar> dm1uDiscoveryCars = new List<TrainCar>();
+        private readonly List<Transform> windowRoots = new List<Transform>();
+        private readonly List<Window> windowScratch = new List<Window>();
+        private readonly List<MeshRenderer> glassScratch = new List<MeshRenderer>();
         private readonly Dictionary<string,WindowClimateState> savedClimates = new Dictionary<string,WindowClimateState>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string,WindowSnowMask> savedMasks = new Dictionary<string,WindowSnowMask>();
         private static string MaskId(TrainCar car,Window window)
@@ -149,6 +173,82 @@ namespace DVSeasons.Mod
             foreach(var pair in savedClimates) destination.Add(new CabFrostState {Id=pair.Key,Climate=pair.Value});
         }
         private float nextScan, nextClimate, lastClimate;
+        private bool fleetClimate;
+
+        private Cab EnsureCab(TrainCar car)
+        {
+            Cab cab;
+            if (cabs.TryGetValue(car, out cab)) return cab;
+            cab = new Cab { Car = car, Id = car.CarGUID,
+                Climate = CabHeating.CustomClimate(car) ?? new WindowWinterClimate() };
+            WindowClimateState saved;
+            if (!CabHeating.UsesNetworkClimate && !CabEngineHeating.IsCustomLocomotive(car) &&
+                !string.IsNullOrEmpty(car.CarGUID) && savedClimates.TryGetValue(car.CarGUID, out saved)) cab.Climate.Restore(saved);
+            cabs.Add(car, cab);
+            return cab;
+        }
+
+        public WindowWinterClimate ClimateFor(TrainCar car)
+        {
+            Cab cab;
+            return car != null && cabs.TryGetValue(car, out cab) ? cab.Climate : null;
+        }
+
+        // Thermal simulation has no dependency on the host's camera, glass
+        // materials or visual settings. The MP host covers all loaded engines;
+        // clients only consume the confirmed GUID-keyed state, even on re-entry.
+        public void UpdateClimate(SeasonState state, bool wholeFleet)
+        {
+            fleetClimate = wholeFleet;
+            float now = Time.time;
+            if (state == null || now < nextClimate) return;
+            float dt = lastClimate > 0 ? Mathf.Clamp(now - lastClimate, 0, 1) : .1f;
+            lastClimate = now; nextClimate = now + (wholeFleet ? .5f : .1f);
+            active = this;
+            if (wholeFleet && !CabHeating.UsesNetworkClimate)
+                foreach (var car in RailSnowGameSource.GetCars())
+                    if (car != null && car.IsLoco) EnsureCab(car);
+            removed.Clear();
+            foreach (var cab in cabs.Values)
+            {
+                if (cab.Car == null)
+                {
+                    if (!string.IsNullOrEmpty(cab.Id)) savedClimates[cab.Id] = cab.Climate.Capture();
+                    removed.Add(cab.Car); continue;
+                }
+                cab.AmbientTemperature = state.TemperatureCelsius;
+                if (cab.Id != cab.Car.CarGUID)
+                {
+                    cab.Id = cab.Car.CarGUID; cab.Climate = new WindowWinterClimate();
+                    WindowClimateState restored;
+                    if (!CabHeating.UsesNetworkClimate && !string.IsNullOrEmpty(cab.Id) && savedClimates.TryGetValue(cab.Id, out restored))
+                        cab.Climate.Restore(restored);
+                    cab.BindingsReady = false; cab.NetworkDriven = false;
+                }
+                if (CabHeating.UsesNetworkClimate)
+                {
+                    var remote = CabHeating.NetworkClimate(cab.Car);
+                    if (remote != null) { cab.Climate = remote; cab.NetworkDriven = true; }
+                    else if (cab.NetworkDriven) { cab.Climate = new WindowWinterClimate(); cab.NetworkDriven = false; }
+                    continue;
+                }
+                var shared = CabHeating.CustomClimate(cab.Car);
+                if (shared != null) { cab.Climate = shared; continue; }
+                Bind(cab, now);
+                bool running = cab.EngineOn != null ? cab.EngineOn.Value > .5f
+                    : cab.EngineRpm != null && cab.EngineRpm.Value > .05f;
+                var sim = cab.Car.SimController;
+                if (sim != null && sim.firebox != null && sim.firebox.IsFireOn) running = true;
+                float heater = cab.Heater != null ? Mathf.Clamp01(cab.Heater.Value) : 0;
+                if (CabHeating.IsActive && (CabHeaterSwitchSystem.IsSupported(cab.Car) || CabEngineHeating.IsCustomLocomotive(cab.Car)))
+                    heater = CabHeating.GetLevel(cab.Car);
+                if (sim != null && sim.firebox != null && sim.firebox.IsFireOn) heater = Math.Max(heater, .85f);
+                cab.Climate.Advance(dt, state.TemperatureCelsius, running,
+                    cab.EngineTemperature != null ? cab.EngineTemperature.Value : state.TemperatureCelsius,
+                    heater, AnythingOpen(cab), state.SnowAmount);
+            }
+            foreach (var car in removed) cabs.Remove(car);
+        }
         private IEnumerator<int> discovery;
         private float snowfall, lighting;
         private Shader shader;
@@ -170,7 +270,7 @@ namespace DVSeasons.Mod
             // Existing cold panes finish warming through their own thermal inertia.
             if (!enabled || state == null || (state.SnowAmount <= .001f && state.TemperatureCelsius > 5
                 && !HasColdPanes()))
-            { Dispose(); return; }
+            { ReleaseVisuals(); return; }
             if (camera == null) return;
             if (shader == null) shader = repository.LoadShader("WinterWindow");
             if (shader == null) return;
@@ -184,62 +284,41 @@ namespace DVSeasons.Mod
                 discovery = Discover(camera, now).GetEnumerator();
             }
             using (SnowPerformance.Measure("window-discovery")) FrameDiscovery.Advance(ref discovery);
-            if (now >= nextClimate)
-            {
-                float dt = lastClimate > 0 ? Mathf.Clamp(now - lastClimate, 0, 1) : .1f;
-                lastClimate = now; nextClimate = now + .1f;
-                foreach (var cab in cabs.Values)
-                {
-                    if (cab.Car == null) continue;
-                    cab.AmbientTemperature = state.TemperatureCelsius;
-                    // Custom-car climate lives independently of this visual
-                    // controller and is also shared with Survival without panes.
-                    var sharedClimate = CabHeating.CustomClimate(cab.Car);
-                    if (sharedClimate != null) { cab.Climate = sharedClimate; continue; }
-                    Bind(cab, now);
-                    bool running = cab.EngineOn != null ? cab.EngineOn.Value > .5f
-                        : cab.EngineRpm != null && cab.EngineRpm.Value > .05f;
-                    var sim = cab.Car.SimController;
-                    if (sim != null && sim.firebox != null && sim.firebox.IsFireOn) running = true;
-                    bool open = AnythingOpen(cab);
-                    float heater = cab.Heater != null ? Mathf.Clamp01(cab.Heater.Value) : 0;
-                    if (CabHeating.IsActive && (CabHeaterSwitchSystem.IsSupported(cab.Car) || CabEngineHeating.IsCustomLocomotive(cab.Car)))
-                        heater = CabHeating.GetLevel(cab.Car);
-                    // Steam's firebox warms the cab without a separate electrical heater.
-                    if (sim != null && sim.firebox != null && sim.firebox.IsFireOn) heater = Math.Max(heater, .85f);
-                    cab.Climate.Advance(dt, state.TemperatureCelsius, running,
-                        cab.EngineTemperature != null ? cab.EngineTemperature.Value : state.TemperatureCelsius,
-                        heater, open, state.SnowAmount);
-                }
-            }
+            UpdateClimate(state, fleetClimate);
             // Reuse the actual glass geometry and follow streamed/moving windows.
             // Never change the native droplet materials or their property blocks.
             collisionPanes.Clear(); cameraCab = null;
             float nearestCab = 25f;
+            var cameraPosition = camera.transform.position;
             foreach (var pane in panes)
             {
-                if (pane.Frame == null) continue;
-                float distance = (pane.Frame.position-camera.transform.position).sqrMagnitude;
-                if (distance < 1600 && pane.Frame.gameObject.activeInHierarchy)
+                var frame = pane.Frame;
+                if (frame == null) continue;
+                var position = frame.position;
+                float distance = (position-cameraPosition).sqrMagnitude;
+                if (distance < 1600 && frame.gameObject.activeInHierarchy)
                 {
                     pane.CollisionMatrix = MovingPaneMatrix(pane);
-                    pane.CollisionCentre = pane.Frame.position;
+                    pane.CollisionCentre = position;
                     collisionPanes.Add(pane);
                     if (pane.Window != null && distance < nearestCab)
                     { nearestCab = distance; cameraCab = pane.Cab; }
                 }
                 var body = pane.Window != null ? pane.Window.rb : pane.Cab.Car.rb;
-                pane.Velocity = body != null ? body.GetPointVelocity(pane.Frame.position) : Vector3.zero;
+                pane.Velocity = body != null ? body.GetPointVelocity(position) : Vector3.zero;
                 for (int i = 0; i < pane.Overlays.Count; i++)
-                    if (pane.Overlays[i] != null)
+                {
+                    var overlay = pane.Overlays[i];
+                    if (overlay != null)
                     {
                         var original = pane.Originals[i];
-                        if (original == null) { pane.Overlays[i].enabled=false; continue; }
-                        pane.Overlays[i].enabled = original != null && original.enabled && !original.forceRenderingOff
+                        if (original == null) { overlay.enabled=false; continue; }
+                        overlay.enabled = original.enabled && !original.forceRenderingOff
                             && (pane.Cab.Climate.Frost > .005f || pane.Cab.Climate.Fog > .005f || snowfall > 0 || pane.Dirty);
                         if (now >= pane.NextProperties)
-                        { SetProperties(pane, i); pane.Overlays[i].SetPropertyBlock(pane.Properties); }
+                        { SetProperties(pane, i); overlay.SetPropertyBlock(pane.Properties); }
                     }
+                }
                 if (now >= pane.NextProperties) pane.NextProperties = now + (distance < 1600 ? .1f : .5f);
                 if (distance < 1600)
                     using (SnowPerformance.Measure("window-wipers")) Wipe(pane);
@@ -311,14 +390,7 @@ namespace DVSeasons.Mod
                     InitializeWipers(existing);
                     continue;
                 }
-                Cab cab;
-                if (!cabs.TryGetValue(car, out cab))
-                {
-                    cab = new Cab { Car = car, Climate = CabHeating.CustomClimate(car) ?? new WindowWinterClimate() };
-                    WindowClimateState saved;
-                    if (!CabEngineHeating.IsCustomLocomotive(car) && !string.IsNullOrEmpty(car.CarGUID) && savedClimates.TryGetValue(car.CarGUID, out saved)) cab.Climate.Restore(saved);
-                    cabs.Add(car, cab);
-                }
+                var cab = EnsureCab(car);
                 var pane = new Pane { Window = window, Cab = cab, LastUpdate = now };
                 RestoreMask(pane);
                 pane.Mask = new Texture2D(Resolution, Resolution, TextureFormat.RGBA32, false, true)
@@ -332,12 +404,18 @@ namespace DVSeasons.Mod
                 InitializeWipers(pane);
                 panes.Add(pane); known.Add(window);
             }
-            foreach (var car in RailSnowGameSource.GetCars().ToArray())
+            // Take a small snapshot before yielding: streamed car lists can
+            // change between frames. Freight wagons need no glass discovery.
+            dm1uDiscoveryCars.Clear();
+            foreach (var car in RailSnowGameSource.GetCars())
+                if (car != null && car.carType == DV.ThingTypes.TrainCarType.LocoDM1U) dm1uDiscoveryCars.Add(car);
+            foreach (var car in dm1uDiscoveryCars)
             {
                 yield return 0;
                 if (car != null && car.carType == DV.ThingTypes.TrainCarType.LocoDM1U)
                     DiscoverDm1uCarGlass(car, now);
             }
+            dm1uDiscoveryCars.Clear();
             removed.Clear();
             foreach (var pair in cabs)
                 if (pair.Key == null) removed.Add(pair.Key);
@@ -349,28 +427,47 @@ namespace DVSeasons.Mod
             }
         }
 
-        private static IEnumerable<Window> LoadedWindows(Camera camera)
+        private IEnumerable<Window> LoadedWindows(Camera camera)
+        { return LoadedWindowsFromCars(RailSnowGameSource.GetCars(), camera != null ? camera.transform.position : Vector3.zero); }
+
+        private IEnumerable<Window> LoadedWindowsFromCars(IList<TrainCar> cars, Vector3 position)
         {
-            var roots = new HashSet<GameObject>();
-            var cars = RailSnowGameSource.GetCars().ToArray();
-            var position = camera != null ? camera.transform.position : Vector3.zero;
-            Array.Sort(cars,(a,b) =>
-                (a != null ? (a.transform.position-position).sqrMagnitude : float.MaxValue).CompareTo(
-                 b != null ? (b.transform.position-position).sqrMagnitude : float.MaxValue));
+            nearbyWindowCars.Clear(); windowRoots.Clear();
             foreach (var car in cars)
+                if (car != null && car.IsLoco && car.gameObject.activeInHierarchy)
+                    nearbyWindowCars.Add(new NearbyCar { Car = car, Distance = (car.transform.position-position).sqrMagnitude });
+            // Read each locomotive position once; sorting the whole freight
+            // yard previously crossed the Unity boundary twice per comparison.
+            nearbyWindowCars.Sort(NearbyCarComparer.Instance);
+            try
             {
-                yield return null;
-                if (car == null || !car.IsLoco || !car.gameObject.activeInHierarchy) continue;
-                // Interior masters first, so exterior duplicates share their mask.
-                foreach (var root in new[] { car.loadedInterior, car.gameObject,
-                    car.loadedExternalInteractables, car.interior != null ? car.interior.gameObject : null })
+                foreach (var nearby in nearbyWindowCars)
                 {
-                    if (root == null || !roots.Add(root)) continue;
-                    var windows = root.GetComponentsInChildren<Window>(true);
-                    Array.Sort(windows, (a,b) => b.simulate.CompareTo(a.simulate));
-                    foreach (var window in windows) yield return window;
+                    yield return null;
+                    var car = nearby.Car;
+                    if (car == null || !car.IsLoco || !car.gameObject.activeInHierarchy) continue;
+                    // Interior masters first, so exterior duplicates share their
+                    // mask. A later child of a visited root was already scanned.
+                    for (int index = 0; index < 4; index++)
+                    {
+                        var root = index == 0 ? car.loadedInterior : index == 1 ? car.gameObject :
+                            index == 2 ? car.loadedExternalInteractables : car.interior != null ? car.interior.gameObject : null;
+                        if (root == null || RootAlreadyScanned(root.transform)) continue;
+                        windowRoots.Add(root.transform);
+                        root.GetComponentsInChildren(true, windowScratch);
+                        windowScratch.Sort(WindowComparer.Instance);
+                        foreach (var window in windowScratch) yield return window;
+                    }
                 }
             }
+            finally { nearbyWindowCars.Clear(); windowRoots.Clear(); windowScratch.Clear(); }
+        }
+
+        private bool RootAlreadyScanned(Transform root)
+        {
+            foreach (var previous in windowRoots)
+                if (previous != null && root.IsChildOf(previous)) return true;
+            return false;
         }
 
         private void AddVisuals(Pane pane, Window window)
@@ -440,7 +537,8 @@ namespace DVSeasons.Mod
         private void DiscoverDm1uGlassRoot(TrainCar car, GameObject root, float now)
         {
             if (root == null) return;
-            foreach (var visual in root.GetComponentsInChildren<MeshRenderer>(true))
+            root.GetComponentsInChildren(true, glassScratch);
+            foreach (var visual in glassScratch)
             {
                 if (visual == null || boundVisuals.Contains(visual) ||
                     !visual.name.StartsWith("dm1u-150_window_", StringComparison.OrdinalIgnoreCase)) continue;
@@ -448,11 +546,10 @@ namespace DVSeasons.Mod
                 if (source == null || !source.name.StartsWith("Glass", StringComparison.OrdinalIgnoreCase)) continue;
                 var filter = visual.GetComponent<MeshFilter>();
                 if (filter == null || filter.sharedMesh == null) continue;
-                Cab cab;
-                if (!cabs.TryGetValue(car, out cab))
-                { cab = new Cab { Car = car, Climate = CabHeating.CustomClimate(car) ?? new WindowWinterClimate() }; cabs.Add(car, cab); }
+                var cab = EnsureCab(car);
                 AddUnregisteredGlass(cab, visual, now);
             }
+            glassScratch.Clear();
         }
         private void AddUnregisteredGlass(Cab cab, MeshRenderer visual, float now)
         {
@@ -756,13 +853,20 @@ namespace DVSeasons.Mod
         }
         public void Dispose()
         {
+            ReleaseVisuals();
+            if (active == this) active = null;
+            cabs.Clear(); removed.Clear(); savedClimates.Clear(); savedMasks.Clear();
+            nextClimate = lastClimate = 0; fleetClimate = false;
+        }
+        private void ReleaseVisuals()
+        {
             collisionPanes.Clear(); cameraCab=null;
             if(frostPattern!=null) UnityEngine.Object.Destroy(frostPattern); frostPattern=null;
-            if(active == this) active = null;
             foreach(var pane in panes) Release(pane);
             if (discovery != null) discovery.Dispose();
             discovery = null;
-            panes.Clear();known.Clear();boundVisuals.Clear();cabs.Clear();removed.Clear();savedClimates.Clear();savedMasks.Clear();shader=null;nextScan=nextClimate=lastClimate=0;cursor=0;reported=false;
+            nearbyWindowCars.Clear(); dm1uDiscoveryCars.Clear(); windowRoots.Clear(); windowScratch.Clear(); glassScratch.Clear();
+            panes.Clear();known.Clear();boundVisuals.Clear();shader=null;nextScan=0;cursor=0;reported=false;
         }
     }
 }

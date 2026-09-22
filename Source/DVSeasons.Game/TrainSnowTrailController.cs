@@ -72,14 +72,14 @@ namespace DVSeasons.Mod
             float speed=velocity.magnitude;
             if(speed<.3f || distance<=0 || distance>Mathf.Max(1.5f,speed*Mathf.Min(Time.deltaTime,.1f)*3f)){wheel.Credit[0]=wheel.Credit[1]=0;return;}
             var direction=velocity.normalized;
+            float powder=SnowTrailProfile.PowderFactor(temperature,wetness);
+            float distanceFade=1-Mathf.SmoothStep(0,1,Mathf.InverseLerp(45,90,Vector3.Distance(contact,camera.transform.position)));
             for(int rail=0;rail<2;rail++)
             {
                 int side=rail*2-1;
                 var point=stable+right*(side*.75f);
                 float snow=remaining[rail]*SnowCoveragePattern.At(point+direction*.06f,coverage);
                 if(snow<.12f){wheel.Credit[rail]=0;continue;}
-                float powder=SnowTrailProfile.PowderFactor(temperature,wetness);
-                float distanceFade=1-Mathf.SmoothStep(0,1,Mathf.InverseLerp(45,90,Vector3.Distance(contact,camera.transform.position)));
                 wheel.Credit[rail]=Mathf.Min(2,wheel.Credit[rail]+distance*2.5f*snow*Mathf.Lerp(.3f,1,powder)*distanceFade);
                 if(wheel.Credit[rail]<1)continue;
                 // Check the actual rail side, not the centre of the axle. Only

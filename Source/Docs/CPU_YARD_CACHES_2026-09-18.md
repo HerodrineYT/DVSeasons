@@ -1,0 +1,33 @@
+# Yard scheduling, turntable discovery and seasonal caches — 2026-09-18
+
+This follows the partial-batching and VR fixes in 0.3.3. It preserves snow coverage, the rolling-stock limit, thermal/side snow, native draw ordering and the existing stereo shader bundle.
+
+## What the game log actually establishes
+
+The local `Player.log` contains the reported window with `turntable-discovery=0.19/54.57`, `vehicle-discovery=1.18/58.46`, `vehicle-parts=1.08/3.13`, and `vehicle-height=0.72/1.36` (mean/max ms). `vehicle-discovery` wraps the entire registry update, including turntable discovery. These are nested timings, not evidence of two independent 50 ms stalls. Car enumeration already returns `CarSpawner.AllCars` directly. No global vehicle search was replaced on speculation.
+
+The new `vehicle-poll`, `vehicle-array-resize` and `vehicle-limiter` scopes distinguish fleet reconciliation, GPU array growth and selection work from turntable scanning, parts and height capture. These remain CPU submission timings, not GPU timings.
+
+## Changes
+
+- The scheduler uses sweep-and-prune over reusable sorted bounds intervals before exact inclusive 3D `Bounds.Intersects` tests. The horizontal axis is selected from centre spread relative to object extent. A nonallocating heapsort orders intervals; unchanged bounds still skip topology work entirely. Original stream order determines component predecessor chains, regardless of sweep order. Dense all-overlapping scenes can still require quadratic pair tests; no edges are discarded to meet a budget.
+- `snow-scheduler-window(components/plans/cache-hits/matrix-uploads/matrices/pair-tests)` reports totals for the current 20-second window. A value-type scope collects actual submission deltas, including multiple cameras, without repeatedly adding lifetime counters. Matrix uploads count full-batch local matrices/IDs; they do not claim to count every Unity/GPU upload.
+- Turntables are found through one queued traversal per initially loaded or newly loaded scene, plus narrow native initialization/controller/rotation hooks. Completed scenes are not rescanned every five seconds. Traversal advances one hierarchy edge at a time, with a 192-node and soft 0.5 ms budget. Unity's root snapshot itself remains indivisible and may exceed that time on a large scene. Scene unload and final disposal release queued references and hooks. Known turntables continue to check late or replaced `visuals` references.
+- Seasonal texture sets prepare only profiles and track stages needed for the requested state. Source upload and missing-profile preparation happen in separate update slices. Redundant spring profile loads and discarded winter billboard fallbacks are removed. Bare-tree billboard pixels share a cache by size and source-view offset, including a shared resized source atlas. Existing colour, alpha, snow-mask and mip formulas are retained.
+
+Seasonal preparation is not a GPU compositor. One missing profile, a texture upload or mip generation can still be indivisible work. The change removes redundant work and splits former multi-profile startup operations; it does not guarantee a hard frame-time bound. A general GPU `lerp` would need to reproduce foliage alpha, spring recolouring, billboard coverage mips and road snow masks first.
+
+## Verification
+
+- Release build: 281 unit tests and 48 localization checks pass, zero warnings/errors.
+- Real scheduler source against Unity API doubles: 2,709 checks and 987,081 requests, including exact brute-force component/predecessor comparison, 600 randomized 3D scenes, touching bounds, dense overlaps, diagonal placement and moving 220-car yards.
+- In the moving-yard audit, exact pair tests fell from 2,890,800 to 259,517 (91.0% fewer). A separate 1,000-frame warmed run allocated zero managed bytes. These are synthetic CPU measurements, not Unity-native allocation or whole-game FPS claims.
+- Production log aggregation: 26 checks for multiple cameras/registries, consecutive and idle report windows, reset/recreation, counter overflow and exception cleanup. 100,000 warmed scopes allocated zero managed bytes.
+- Packed-bundle Unity yard fixture: exact snow IDs, coverage, R8 slopes and captured half-float coordinates match native ordering for 128 cars, partial overlaps, motion, hidden/destroyed renderers, fallbacks, origin shifts and limits 0/96/64. Stationary ordered frames reuse 350 plans without component rebuilds or full matrix-array uploads.
+- Native turntable fixture: an 8,192-child hierarchy stays within 192 nodes per step; 1,200 idle calls make no additional scene snapshots or node visits. Native initialization/rotation hooks, inactive and late objects, replaced visuals, scene unload/moves, disposal/recreation and the original GPU rotation/local-mask checks pass.
+- Seasonal startup and surface fixtures: procedural-mode activation and explicit settings changes preserve/rebuild texture sets as intended; road/roof alpha, 0/28/62/100% accumulation and exact thaw restoration pass.
+- Independent texture parity loads a renamed pre-change runtime DLL alongside the current one: 1,144 output comparisons and 3,952 mip checks match exact RGBA bytes and sampler settings. Coverage includes all seven categories, deciduous/evergreen variants, seasonal endpoints/transitions, strengths, track stages, accumulation/thaw, valid overrides, absent/partial packs, unreadable custom stages, interrupted style updates, shared cache and cancellation/disposal. Unity 2019 accepts the test's five invalid image bytes; a locked custom file separately exercises the actual read failure and fallback.
+
+The texture fixture also measures actual `UpdateChunk` CPU work with a warm repository cache and GPU waits excluded. A 1024×128 evergreen billboard's first winter update took 166.941 ms total / 131.063 ms largest slice in the previous controller, versus 81.501 / 28.874 ms split across more slices in the new one. A foliage texture resized to 64×64 took 6.471 / 6.300 ms versus 3.205 / 2.340 ms. These are single synthetic comparisons, not an estimate of game FPS or a guarantee about the maximum frame. The unchanged billboard mip upload is still visible as a sizeable slice.
+
+Evidence is under `artifacts/verification`: `cpu-yard-final-build.log`, `scheduler-sweep-audit20260918.json`, `snow-performance-audit20260918.json`, `cpu-yard-batching.log`, `cpu-yard-turntable-final.log`, `cpu-yard-seasonal-startup.log`, `cpu-yard-surface.log`, and `cpu-yard-seasonal-parity-verified.log`. The existing VR-capable AssetBundles are unchanged. A comparable live yard run is still required to measure FPS and the remaining texture/discovery spikes.

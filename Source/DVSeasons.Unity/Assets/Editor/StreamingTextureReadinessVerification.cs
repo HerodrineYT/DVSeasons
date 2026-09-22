@@ -28,8 +28,13 @@ namespace DVSeasons.AssetBundleBuild
         private static int expectedMipmapLevel;
         private static bool requestSetterWorks;
         private static bool previousStreamingMipmapsActive;
+        private static bool previousForceLoadAll;
         private static bool havePreviousStreamingState;
 
+        private static bool liveStreaming;
+        private static bool forceResident;
+        public static void VerifyWithStreaming() { liveStreaming = true; Verify(); }
+        public static void VerifyForceResident() { liveStreaming = true; forceResident = true; Verify(); }
         public static void Verify()
         {
             try
@@ -70,12 +75,12 @@ namespace DVSeasons.AssetBundleBuild
             if (File.Exists(fixturePath)) File.Delete(fixturePath);
 
             previousStreamingMipmapsActive = QualitySettings.streamingMipmapsActive;
+            previousForceLoadAll = Texture.streamingTextureForceLoadAll;
             havePreviousStreamingState = true;
-            // Keep the editor's global budget disabled for this headless check.
-            // Unity's NullGfxDevice cannot service an asynchronous mip request;
-            // the runtime still exercises IsRequestedMipmapLevelLoaded and the
-            // loaded-level quality check, while a real player enables its budget.
-            QualitySettings.streamingMipmapsActive = false;
+            // Verify is also usable with NullGfxDevice, which cannot stream mips.
+            // The two live entry points must run with a real graphics device.
+            QualitySettings.streamingMipmapsActive = liveStreaming;
+            Texture.streamingTextureForceLoadAll = forceResident;
 
             var generated = new Texture2D(1024, 1024, TextureFormat.RGBA32, true, false);
             var pixels = new Color32[1024 * 1024];
@@ -130,8 +135,11 @@ namespace DVSeasons.AssetBundleBuild
                 var ready = (bool)tryAcquire.Invoke(null, arguments);
                 if (!ready)
                 {
-                    // This is a test timeout only. Runtime code has no timeout and
-                    // keeps the set queued until Unity reports the exact mip ready.
+                    if(attempts==1 || attempts==299)
+                        Debug.Log("STREAMING_WAIT: request="+fixture.requestedMipmapLevel+" loaded="+fixture.loadedMipmapLevel+
+                            " loading="+fixture.loadingMipmapLevel+" complete="+fixture.IsRequestedMipmapLevelLoaded()+" streaming="+QualitySettings.streamingMipmapsActive);
+                    // This is a test timeout only. Runtime waits for sufficient
+                    // resident detail, without accepting a blurry timeout fallback.
                     if (attempts < 300) return;
                     throw new InvalidOperationException(
                         "Unity did not report the requested streaming mip as loaded within 300 editor updates.");
@@ -147,6 +155,13 @@ namespace DVSeasons.AssetBundleBuild
                 Require(fixture.loadedMipmapLevel >= 0 && fixture.loadedMipmapLevel <= expectedMipmapLevel,
                     "Read lease was granted before a sufficiently detailed mip was resident (loaded " +
                     fixture.loadedMipmapLevel + ", requested " + expectedMipmapLevel + ").");
+                if (forceResident)
+                {
+                    Require(fixture.loadedMipmapLevel == 0 && expectedMipmapLevel > 0,
+                        "Fixture did not retain a finer mip than the readback requested.");
+                    Require(!fixture.IsRequestedMipmapLevelLoaded(),
+                        "Fixture did not reproduce Unity's false exact-mip completion signal.");
+                }
                 if (requestSetterWorks)
                     Require(selected == expectedMipmapLevel,
                         "Read lease did not hold the selected mip level; Unity reports " + selected + ".");
@@ -187,7 +202,10 @@ namespace DVSeasons.AssetBundleBuild
                 if (exception == null) exception = cleanupException;
             }
             if (havePreviousStreamingState)
+            {
                 QualitySettings.streamingMipmapsActive = previousStreamingMipmapsActive;
+                Texture.streamingTextureForceLoadAll = previousForceLoadAll;
+            }
             AssetDatabase.DeleteAsset(FixtureAssetPath);
             AssetDatabase.Refresh();
             if (exception != null)
@@ -196,7 +214,7 @@ namespace DVSeasons.AssetBundleBuild
                 EditorApplication.Exit(exitCode);
                 return;
             }
-            Debug.Log("DVSEASONS_STREAMING_READINESS_OK: requested mip completion, " +
+            Debug.Log("DVSEASONS_STREAMING_READINESS_OK: sufficient resident mip detail, " +
                 "non-readable fixture, and automatic/explicit request restoration verified.");
             EditorApplication.Exit(0);
         }

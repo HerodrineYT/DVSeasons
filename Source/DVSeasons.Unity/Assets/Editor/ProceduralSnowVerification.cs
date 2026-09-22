@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using UnityEditor;
@@ -68,6 +69,11 @@ namespace DVSeasons.AssetBundleBuild
             repositoryType.GetProperty("Bundle").GetSetMethod(true).Invoke(repository,new object[]{bundle});
             var type=assembly.GetType("DVSeasons.Mod.ProceduralSnowController",true);
             controller=Activator.CreateInstance(type,new[]{repository});apply=type.GetMethod("Apply");
+            // Keep the extracted model in normal discovery after the native
+            // assembly loads. Manual Register alone is removed by the next
+            // fleet scan, especially when the camera teleports to the far pose.
+            type.GetMethod("SetVehicleDiscovery").Invoke(controller,new object[]{new Func<IEnumerable<Component>>(()=>new Component[0])});
+            type.GetMethod("SetMovingSurfaceDiscovery").Invoke(controller,new object[]{new Func<IEnumerable<Transform>>(()=>new[]{vehicle.transform})});
             type.GetMethod("SetWeather").Invoke(controller,new object[]{1f});
             var registry=type.GetField("vehicles",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(controller);
             registry.GetType().GetMethod("Register").Invoke(registry,new object[]{vehicle.transform,interior.transform,null});
@@ -100,6 +106,9 @@ namespace DVSeasons.AssetBundleBuild
                     float wanted=level==0?1:(thresholds[level-1]+thresholds[level])*.5f;
                     QualitySettings.lodBias=wanted/screenHeight;
                     for(int i=0;i<5;i++) {apply.Invoke(controller,new object[]{1f,true});camera.Render();}
+                    var registered=(System.Collections.IList)registry.GetType().GetField("vehicles",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(registry);
+                    Require(registered.Count==1,"DE6 fixture was lost during fleet discovery at pass "+pass);
+                    Require((int)registry.GetType().GetProperty("NativeMaterialSlots").GetValue(registry,null)>0,"DE6 fixture did not exercise native-material snow");
                     var shot=Capture(1,"de6-"+pass+"-lod"+level);
                     UnityEngine.Object.DestroyImmediate(shot);
                     var read=new Texture2D(512,384,TextureFormat.RGBAHalf,false,true);
@@ -259,7 +268,10 @@ namespace DVSeasons.AssetBundleBuild
         public static void VerifySurfaceCore()
         { VerifySurface(false); }
 
-        private static void VerifySurface(bool extended)
+        public static void VerifyLandscape()
+        { VerifySurface(true,true); }
+
+        private static void VerifySurface(bool extended,bool landscapeOnly=false)
         {
             var root = Path.GetFullPath(Path.Combine(Application.dataPath,"../.."));
             directory = Path.Combine(root,"artifacts/verification/0.2.26");
@@ -349,6 +361,7 @@ namespace DVSeasons.AssetBundleBuild
                 var ldrBase=Capture(0,"snow-ldr-0"); var ldrWinter=Capture(1,"snow-ldr-100");
                 Require(Sample(ldrWinter,floor)>Sample(ldrBase,floor)+0.10f,"LDR snow failed.");
                 camera.allowHDR=true; camera.targetTexture=target; UnityEngine.Object.DestroyImmediate(ldrTarget);
+                VerifyCoarseExposureSlopes(type);
                 if(!extended)
                 {
                     foreach(var texture in new[]{baseline,middle,winter,thaw,night,reloaded,ldrBase,ldrWinter})
@@ -392,6 +405,12 @@ namespace DVSeasons.AssetBundleBuild
                 VerifyDistantExposure(type);
                 VerifyWeatherAndRails(type);
                 VerifyWorldOrigin(type);
+                if(landscapeOnly)
+                {
+                    foreach(var texture in new[]{baseline,middle,winter,thaw,night,reloaded}) UnityEngine.Object.DestroyImmediate(texture);
+                    Debug.Log("LANDSCAPE_SNOW_OK: near/far/distant slopes, native terrain holes, bridges, displaced proxies, dry streaming, rails and world origin.");
+                    return;
+                }
                 VerifyIncrementalScan(assembly);
                 VerifyMovingVehicle(type,material,sun);
                 VerifyFreightAndFleet(type,material);
@@ -537,6 +556,75 @@ namespace DVSeasons.AssetBundleBuild
                 ((IDisposable)controller).Dispose();
             }
             Debug.Log("DVSeasons uneven terrain checks passed: gentle slopes, native flags restored, bridge depth and terrain holes.");
+        }
+        private static void VerifyCoarseExposureSlopes(Type type)
+        {
+            var oldPosition=camera.transform.position;var oldRotation=camera.transform.rotation;
+            var oldFar=camera.farClipPlane;
+            var owner=new GameObject("Far exposure slope fixture");
+            var mesh=new Mesh {vertices=new[]{new Vector3(-400,-180,-400),new Vector3(-400,-20,400),
+                new Vector3(400,180,400),new Vector3(400,20,-400)},triangles=new[]{0,1,2,0,2,3}};
+            mesh.RecalculateNormals();mesh.RecalculateBounds();
+            owner.AddComponent<MeshFilter>().sharedMesh=mesh;
+            var material=new Material(Shader.Find("Standard")) {color=new Color(.08f,.08f,.08f)};
+            material.SetFloat("_Glossiness",0);owner.AddComponent<MeshRenderer>().sharedMaterial=material;
+            owner.transform.position=new Vector3(6000,250,0);
+            var roof=new GameObject("Far exposure shelter fixture");
+            var roofMesh=new Mesh {vertices=new[]{new Vector3(-80,-36,-80),new Vector3(-80,-4,80),
+                new Vector3(80,36,80),new Vector3(80,4,-80)},triangles=new[]{0,1,2,0,2,3}};
+            roofMesh.RecalculateNormals();roofMesh.RecalculateBounds();
+            roof.AddComponent<MeshFilter>().sharedMesh=roofMesh;
+            var roofRenderer=roof.AddComponent<MeshRenderer>();roofRenderer.sharedMaterial=material;
+            roof.transform.position=owner.transform.position+new Vector3(0,8,0);
+            try
+            {
+                foreach(bool distantMap in new[]{false,true})
+                {
+                    roofRenderer.enabled=false;
+                    camera.transform.position=owner.transform.position+new Vector3(0,distantMap?900:450,distantMap?-1600:-650);
+                    camera.transform.LookAt(owner.transform.position);
+                    camera.farClipPlane=distantMap?8000:2000;
+                    ((IDisposable)controller).Dispose();
+                    var label=distantMap?"coarse-distant-slope":"coarse-far-slope";
+                    var bare=Capture(0,label+"-bare");
+                    for(int frame=0;frame<4;frame++) {apply.Invoke(controller,new object[]{1f,true});camera.Render();}
+                    var snow=Capture(1,label+"-snow");
+                    int covered=0,total=0;
+                    // Different sub-texel offsets expose the old height-contour
+                    // failure even when a row happens to align with sample centres.
+                    for(int z=-180;z<=180;z+=23) for(int x=-250;x<=250;x+=23)
+                    {
+                        var point=owner.transform.position+new Vector3(x,.25f*x+.2f*z,z);
+                        total++;if(Sample(snow,point)-Sample(bare,point)>.12f) covered++;
+                    }
+                    Debug.Log(label+" coverage="+covered+"/"+total);
+                    Require(covered>=total*.98f,"Coarse exposure map produced bare stripes on a planar slope");
+
+                    roofRenderer.enabled=true;
+                    type.GetMethod("InvalidateGeometry").Invoke(controller,null);
+                    for(int frame=0;frame<4;frame++)
+                    {
+                        type.GetField("nextProxyRefresh",BindingFlags.NonPublic|BindingFlags.Instance).SetValue(controller,0f);
+                        apply.Invoke(controller,new object[]{1f,true});camera.Render();
+                    }
+                    // Inspect the sheltered plane without altering its cached
+                    // exposure. The roof was genuinely drawn by the capture.
+                    roofRenderer.forceRenderingOff=true;
+                    var sheltered=Capture(1,label+"-shelter");
+                    Require(Mathf.Abs(Sample(sheltered,owner.transform.position)-Sample(bare,owner.transform.position))<.035f,
+                        "Slope compensation allowed snow through an elevated shelter");
+                    roofRenderer.forceRenderingOff=false;
+                    foreach(var texture in new[]{bare,snow,sheltered}) UnityEngine.Object.DestroyImmediate(texture);
+                }
+            }
+            finally
+            {
+                camera.transform.SetPositionAndRotation(oldPosition,oldRotation);camera.farClipPlane=oldFar;
+                foreach(var item in new UnityEngine.Object[]{owner,roof,mesh,roofMesh,material}) UnityEngine.Object.DestroyImmediate(item);
+                ((IDisposable)controller).Dispose();
+            }
+            Debug.Log("COARSE_SNOW_EXPOSURE_OK: metre-scale far and distant maps cover slopes continuously while elevated shelters stay bare.");
+            for(int frame=0;frame<4;frame++) {apply.Invoke(controller,new object[]{1f,true});camera.Render();}
         }
         private static void VerifyDistantExposure(Type type)
         {
@@ -740,7 +828,7 @@ namespace DVSeasons.AssetBundleBuild
             int visits=0;
             Action<MeshRenderer> visit=r=>{if(ids.Remove(r.GetInstanceID())) visits++;};
             var scanType=assembly.GetType("DVSeasons.Mod.IncrementalSceneScan`1",true).MakeGenericType(typeof(MeshRenderer));
-            var scan=Activator.CreateInstance(scanType,new object[]{0f,4,visit});
+            var scan=Activator.CreateInstance(scanType,new object[]{0f,4,visit,false});
             var step=scanType.GetMethod("Step");
             try
             {
@@ -1105,7 +1193,33 @@ namespace DVSeasons.AssetBundleBuild
         }
         private static Texture2D Capture(float amount,string name)
         {
-            apply.Invoke(controller,new object[]{amount,true}); camera.Render();
+            if(amount>0)
+            {
+                var type=controller.GetType();
+                var nearMap=type.GetField("near",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(controller);
+                if(!(bool)nearMap.GetType().GetField("Ready").GetValue(nearMap))
+                {
+                    // These static-scene assertions inspect final coverage. The
+                    // separate discovery fixtures test the per-frame budgets.
+                    var exclusions=type.GetField("exposureExclusions",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(controller);
+                    var update=exclusions.GetType().GetMethod("Update");
+                    var steps=exclusions.GetType().GetProperty("LastAnimalDiscoverySteps",BindingFlags.Instance|BindingFlags.NonPublic);
+                    for(int scan=0;scan<2048;scan++)
+                    {
+                        update.Invoke(exclusions,null);
+                        if((int)steps.GetValue(exclusions,null)==0) break;
+                    }
+                }
+            }
+            // Initial near/far/distant captures are deliberately spread across
+            // frames. Read the completed snow render, not its first warmup frame.
+            for(int frame=0;frame<4;frame++)
+            {
+                apply.Invoke(controller,new object[]{amount,true}); camera.Render();
+                if(amount<=0) break;
+                var distantMap=controller.GetType().GetField("distant",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(controller);
+                if((bool)distantMap.GetType().GetField("Ready").GetValue(distantMap)) break;
+            }
             var previous=RenderTexture.active; RenderTexture.active=camera.targetTexture;
             var texture=new Texture2D(512,384,TextureFormat.RGBAFloat,false,true);
             texture.ReadPixels(new Rect(0,0,512,384),0,0); texture.Apply();

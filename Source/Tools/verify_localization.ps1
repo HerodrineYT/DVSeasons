@@ -10,7 +10,7 @@ $rows = @(Import-Csv -LiteralPath $csvPath -Encoding UTF8)
 $keys = @($rows.Key)
 if (@($keys | Select-Object -Unique).Count -ne $rows.Count) { throw 'Duplicate localization keys.' }
 $main = Get-Content -LiteralPath (Get-ChildItem -LiteralPath (Join-Path $root 'DVSeasons.Game') -Filter '*.cs' -File | Select-Object -ExpandProperty FullName) -Raw
-$used = @([regex]::Matches($main, '"((?:UI|Status|Settings|Action|Season|Heater)\.[A-Za-z]+)"') | ForEach-Object { 'DVSeasons/' + $_.Groups[1].Value } | Sort-Object -Unique)
+$used = @([regex]::Matches($main, '"((?:UI|Status|Settings|Action|Season|Heater|Diagnostics|Blizzard|ColdStart)\.[A-Za-z0-9]+)"') | ForEach-Object { 'DVSeasons/' + $_.Groups[1].Value } | Sort-Object -Unique)
 foreach ($key in $used) { if ($keys -notcontains $key) { throw "Missing translation: $key" } }
 foreach ($row in $rows) {
     if ($used -notcontains $row.Key) { throw "Unused translation: $($row.Key)" }

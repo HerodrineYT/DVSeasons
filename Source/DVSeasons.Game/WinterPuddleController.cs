@@ -23,7 +23,6 @@ namespace DVSeasons.Mod
         private const float ScanInterval = 2f;
         private const float ResourceRetryInterval = 5f;
         private const float IceTileSize = 3.5f;
-        private const int TextureSize = 1024;
 
         private static readonly int PuddleSmoothnessId =
             Shader.PropertyToID("_PuddleSmoothness");
@@ -34,6 +33,8 @@ namespace DVSeasons.Mod
         private static readonly int TileSizeId = Shader.PropertyToID("_TileSize");
         private static readonly int InverseViewProjectionId =
             Shader.PropertyToID("_DVInverseViewProjection");
+        private static readonly int StereoInverseViewProjectionId =
+            Shader.PropertyToID("_DVInverseViewProjectionStereo");
 
 
         private sealed class WetStuffBinding
@@ -41,6 +42,7 @@ namespace DVSeasons.Mod
             internal WetStuffComponent Component;
             internal Camera Camera;
             internal Action<CommandBuffer> Handler;
+            internal readonly Matrix4x4[] StereoInverseViewProjection = new Matrix4x4[2];
         }
 
         private readonly SeasonAssetBundleRepository texturePack;
@@ -48,6 +50,8 @@ namespace DVSeasons.Mod
         private readonly Dictionary<int, WetStuffBinding> bindings =
             new Dictionary<int, WetStuffBinding>();
         private readonly List<int> staleBindingIds = new List<int>();
+        private readonly RenderTextureFormat smoothnessFormat=SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.R8)
+            ? RenderTextureFormat.R8 : RenderTextureFormat.ARGB32;
 
         private Texture2D iceTexture;
         private Material gbufferMaterial;
@@ -108,7 +112,7 @@ namespace DVSeasons.Mod
         {
             activeAmount = 0f;
             Restore();
-            if (iceTexture != null) UnityEngine.Object.Destroy(iceTexture);
+            // Bundled/override textures are owned by the repository.
             if (gbufferMaterial != null) UnityEngine.Object.Destroy(gbufferMaterial);
             if (fullscreenQuad != null) UnityEngine.Object.Destroy(fullscreenQuad);
             iceTexture = null;
@@ -138,22 +142,7 @@ namespace DVSeasons.Mod
 
             if (iceTexture == null)
             {
-                Color32[] pixels;
-                if (texturePack.TryLoadPixels(IceTextureAssetName, SeasonKind.Winter,
-                    TextureSize, TextureSize, out pixels))
-                {
-                    iceTexture = new Texture2D(TextureSize, TextureSize,
-                        TextureFormat.RGBA32, true, false)
-                    {
-                        name = "DVSeasons Screen-Space Puddle Ice",
-                        wrapMode = TextureWrapMode.Repeat,
-                        filterMode = FilterMode.Trilinear,
-                        anisoLevel = 4,
-                        hideFlags = HideFlags.HideAndDontSave
-                    };
-                    iceTexture.SetPixels32(pixels);
-                    iceTexture.Apply(true, false);
-                }
+                texturePack.TryLoadTexture(IceTextureAssetName,SeasonKind.Winter,out iceTexture);
             }
 
             if (gbufferMaterial == null)
@@ -245,17 +234,31 @@ namespace DVSeasons.Mod
                 return;
 
             var camera = binding.Camera;
-            var projection = GL.GetGPUProjectionMatrix(camera.projectionMatrix, true);
-            var inverseViewProjection = (projection * camera.worldToCameraMatrix).inverse;
+            var inverseViewProjection = StereoRenderSupport.InverseViewProjection(camera);
 
-            commandBuffer.GetTemporaryRT(SpecularCopyId, -1, -1, 0,
-                FilterMode.Point, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
-            commandBuffer.Blit(BuiltinRenderTextureType.GBuffer1, SpecularCopyId);
+            // Match WetStuff's XR mask and the camera GBuffer, including the
+            // double-wide eye layout. Camera-sized mono RTs are not sufficient.
+            StereoRenderSupport.GetTemporaryRT(commandBuffer, SpecularCopyId,
+                camera, smoothnessFormat, FilterMode.Point);
+            // Only smoothness (alpha) changes. Copy one byte per pixel and let
+            // ColorMask A preserve the original specular RGB in place.
+            commandBuffer.Blit(BuiltinRenderTextureType.GBuffer1, SpecularCopyId,gbufferMaterial,1);
             commandBuffer.SetGlobalTexture(SpecularCopyId, SpecularCopyId);
             commandBuffer.SetGlobalTexture(IceTextureId, iceTexture);
             commandBuffer.SetGlobalFloat(IceAmountId, Smooth(activeAmount));
             commandBuffer.SetGlobalFloat(TileSizeId, IceTileSize);
             commandBuffer.SetGlobalMatrix(InverseViewProjectionId, inverseViewProjection);
+            if (camera.stereoEnabled)
+            {
+                for (var eyeIndex = 0; eyeIndex < 2; eyeIndex++)
+                {
+                    var eye = (Camera.StereoscopicEye)eyeIndex;
+                    binding.StereoInverseViewProjection[eyeIndex] =
+                        StereoRenderSupport.InverseViewProjection(camera, eye);
+                }
+                commandBuffer.SetGlobalMatrixArray(StereoInverseViewProjectionId,
+                    binding.StereoInverseViewProjection);
+            }
             // Never bind/write GBuffer0: wet vehicles and buildings must retain
             // their exact native albedo, with no winter blue/grey colour filter.
             commandBuffer.SetRenderTarget(BuiltinRenderTextureType.GBuffer1);

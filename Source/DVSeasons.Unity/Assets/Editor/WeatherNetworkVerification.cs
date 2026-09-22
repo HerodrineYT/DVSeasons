@@ -12,7 +12,8 @@ namespace DVSeasons.AssetBundleBuild
         {
             string root = Path.GetFullPath(Path.Combine(Application.dataPath, "../.."));
             string managed = Path.Combine(Environment.GetEnvironmentVariable("DVSEASONS_VERIFY_GAME"), "DerailValley_Data/Managed");
-            string mod = Path.Combine(root, "artifacts/build/DVSeasons");
+            string mod = Environment.GetEnvironmentVariable("DVSEASONS_VERIFY_MOD");
+            if (string.IsNullOrEmpty(mod)) mod = Path.Combine(root, "artifacts/build/DVSeasons");
             ResolveEventHandler resolve = (s, e) =>
             {
                 foreach (var dir in new[] { mod, managed, Path.Combine(managed, "UnityModManager") })

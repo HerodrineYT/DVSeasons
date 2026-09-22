@@ -12,7 +12,7 @@ namespace DVSeasons.AssetBundleBuild
         private const string BundleName = "dvseasons_dv99";
         private const string RuntimeSeasonalTextureRoot =
             "Resources/Runtime/Textures/Seasonal";
-        private static readonly HashSet<string> LooseWinterTextureNames =
+        private static readonly HashSet<string> PreparedWinterTextureNames =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 "AsphaltRoad_01d.png",
@@ -36,7 +36,9 @@ namespace DVSeasons.AssetBundleBuild
                 "SleeperOld_d.png",
                 "SnowSurfaceDense.png",
                 "WaterIceAlbedo.png",
-                "WaterIceNormal.png"
+                "WaterIceNormal.png",
+                "Coal_01d.png",
+                "WinterBallastBalanced.png"
             };
 
         public static void Build()
@@ -51,10 +53,10 @@ namespace DVSeasons.AssetBundleBuild
             for (var i = 0; i < guids.Length; i++)
                 sourceTextures.Add(AssetDatabase.GUIDToAssetPath(guids[i]));
             sourceTextures.Sort(StringComparer.Ordinal);
-            if (sourceTextures.Count != 171)
-                throw new InvalidOperationException("Expected 171 source Texture2D assets, found " +
+            if (sourceTextures.Count != 173)
+                throw new InvalidOperationException("Expected 173 source Texture2D assets, found " +
                     sourceTextures.Count);
-            ValidateLooseTextureMirrors(sourceTextures);
+            ValidatePreparedTextureMirrors(sourceTextures);
 
             var assets = new List<string>(sourceTextures.Count);
             for (var i = 0; i < sourceTextures.Count; i++)
@@ -70,22 +72,35 @@ namespace DVSeasons.AssetBundleBuild
             for (var i = 0; i < shaderGuids.Length; i++)
                 shaderAssets.Add(AssetDatabase.GUIDToAssetPath(shaderGuids[i]));
             shaderAssets.Sort(StringComparer.Ordinal);
-            if (shaderAssets.Count != 10)
-                throw new InvalidOperationException("Expected 10 Shader assets, found " +
+            if (shaderAssets.Count != 11)
+                throw new InvalidOperationException("Expected 11 Shader assets, found " +
                     shaderAssets.Count);
             assets.AddRange(shaderAssets);
             assets.Add(AssetRoot + "/Generated/Terrain_spring.asset");
             assets.Add(AssetRoot + "/Generated/Terrain_autumn.asset");
             assets.Add(AssetRoot + "/Generated/Terrain_winter.asset");
 
-            var definition = new UnityEditor.AssetBundleBuild
+            var winterAssets = new List<string>();
+            var trackAssets = new List<string>();
+            foreach (var path in sourceTextures)
             {
-                assetBundleName = BundleName,
-                assetNames = assets.ToArray()
+                if (!IsPreparedTexture(path)) continue;
+                var relative = path.Substring(AssetRoot.Length + 1);
+                if (string.Equals(relative, GetCanonicalRuntimeRelativePath(relative), StringComparison.OrdinalIgnoreCase))
+                {
+                    if (relative.StartsWith("winter_track/", StringComparison.OrdinalIgnoreCase)) trackAssets.Add(path);
+                    else winterAssets.Add(path);
+                }
+            }
+            if (winterAssets.Count != 22 || trackAssets.Count != 20)
+                throw new InvalidOperationException("Expected 22 prepared winter and 20 track textures, found " + winterAssets.Count + "/" + trackAssets.Count);
+            var definitions = new[]
+            {
+                new UnityEditor.AssetBundleBuild { assetBundleName = BundleName, assetNames = assets.ToArray() },
+                new UnityEditor.AssetBundleBuild { assetBundleName = "dvseasons_winter", assetNames = winterAssets.ToArray() },
+                new UnityEditor.AssetBundleBuild { assetBundleName = "dvseasons_tracks", assetNames = trackAssets.ToArray() }
             };
-            var manifest = BuildPipeline.BuildAssetBundles(output, new[] { definition },
-                BuildAssetBundleOptions.ChunkBasedCompression | BuildAssetBundleOptions.DeterministicAssetBundle,
-                BuildTarget.StandaloneWindows64);
+            var manifest = BuildWithRuntimeInstancing(output, definitions);
             if (manifest == null || !File.Exists(Path.Combine(output, BundleName)))
                 throw new InvalidOperationException("Unity did not produce " + BundleName);
             foreach (var shaderPath in shaderAssets)
@@ -105,17 +120,100 @@ namespace DVSeasons.AssetBundleBuild
                 AutumnLeafVerification.Verify(verifiedBundle);
                 SpringTerrainVerification.Verify(verifiedBundle);
                 SnowGlareVerification.Verify(verifiedBundle);
+                SnowAmbientCopyVerification.Verify(verifiedBundle);
+                SnowProceduralCostVerification.Verify(verifiedBundle);
+                VehicleSideSnowVerification.Verify(verifiedBundle);
+                SnowFullInstancingVerification.Verify(verifiedBundle.LoadAsset<Shader>("assets/dvseasons/dv99/shaders/snowvehicle.shader"));
                 SnowDustVerification.Verify(verifiedBundle);
             }
             finally { verifiedBundle.Unload(true); }
+            VerifyPreparedBundle(output, "dvseasons_winter", winterAssets);
+            VerifyPreparedBundle(output, "dvseasons_tracks", trackAssets);
             Debug.Log("DVSeasons AssetBundle built: " + Path.Combine(output, BundleName) +
-                " (75 textures + 10 shaders + 3 MicroSplat terrain arrays; " +
-                "96 duplicate source/override textures omitted)");
+                " (75 main textures + 22 prepared winter + 20 track textures + 11 shaders + 3 terrain arrays)");
+        }
+
+        private static AssetBundleManifest BuildWithRuntimeInstancing(string output, UnityEditor.AssetBundleBuild[] definitions)
+        {
+            // Snow exclusion materials enable instancing at runtime. Unity
+            // cannot infer that from scene materials when stripping a bundle.
+            // Keep its variant for this build and restore the user's settings,
+            // including the exact on-disk bytes if the build saved them.
+            const string path = "ProjectSettings/GraphicsSettings.asset";
+            var originalBytes = File.ReadAllBytes(path);
+            var objects = AssetDatabase.LoadAllAssetsAtPath(path);
+            if (objects.Length == 0) throw new InvalidOperationException("Cannot read Unity graphics settings.");
+            var settings = new SerializedObject(objects[0]);
+            var stripping = settings.FindProperty("m_InstancingStripping");
+            if (stripping == null) throw new InvalidOperationException("Unity instancing stripping setting is unavailable.");
+            int keepAll = Array.FindIndex(stripping.enumNames,
+                name => string.Equals(name.Replace(" ", string.Empty), "KeepAll", StringComparison.OrdinalIgnoreCase));
+            if (keepAll < 0) throw new InvalidOperationException("Unity does not expose the KeepAll instancing mode.");
+            int original = stripping.intValue;
+            bool wasDirty = EditorUtility.IsDirty(objects[0]);
+            const string playerPath = "ProjectSettings/ProjectSettings.asset";
+            var playerBytes = File.ReadAllBytes(playerPath);
+            var stereoPath = PlayerSettings.stereoRenderingPath;
+#pragma warning disable 618
+            var vrSupported = PlayerSettings.GetVirtualRealitySupported(BuildTargetGroup.Standalone);
+            var vrSdks = PlayerSettings.GetVirtualRealitySDKs(BuildTargetGroup.Standalone);
+#pragma warning restore 618
+            try
+            {
+                stripping.enumValueIndex = keepAll;
+                settings.ApplyModifiedPropertiesWithoutUndo();
+                // Unity strips its built-in stereo keyword even when a shader
+                // explicitly declares multi_compile, unless XR is enabled for
+                // the build target. Keep both mono and the game's OpenVR
+                // double-wide programs in the distributable AssetBundle.
+#pragma warning disable 618
+                PlayerSettings.SetVirtualRealitySDKs(BuildTargetGroup.Standalone, new[] { "None", "OpenVR" });
+                PlayerSettings.SetVirtualRealitySupported(BuildTargetGroup.Standalone, true);
+#pragma warning restore 618
+                PlayerSettings.stereoRenderingPath = StereoRenderingPath.SinglePass;
+                return BuildPipeline.BuildAssetBundles(output, definitions,
+                    BuildAssetBundleOptions.ChunkBasedCompression | BuildAssetBundleOptions.DeterministicAssetBundle |
+                    BuildAssetBundleOptions.ForceRebuildAssetBundle,
+                    BuildTarget.StandaloneWindows64);
+            }
+            finally
+            {
+                settings.Update();
+                settings.FindProperty("m_InstancingStripping").intValue = original;
+                settings.ApplyModifiedPropertiesWithoutUndo();
+                if (!wasDirty) EditorUtility.ClearDirty(objects[0]);
+                File.WriteAllBytes(path, originalBytes);
+#pragma warning disable 618
+                PlayerSettings.SetVirtualRealitySupported(BuildTargetGroup.Standalone, vrSupported);
+                PlayerSettings.SetVirtualRealitySDKs(BuildTargetGroup.Standalone, vrSdks);
+#pragma warning restore 618
+                PlayerSettings.stereoRenderingPath = stereoPath;
+                File.WriteAllBytes(playerPath, playerBytes);
+            }
+        }
+
+        private static void VerifyPreparedBundle(string output, string bundleName, List<string> assets)
+        {
+            var preparedBundle = AssetBundle.LoadFromFile(Path.Combine(output, bundleName));
+            if (preparedBundle == null) throw new InvalidOperationException("Cannot reopen prepared winter bundle.");
+            try
+            {
+                var names = preparedBundle.GetAllAssetNames();
+                if (names.Length != assets.Count) throw new InvalidOperationException("Prepared texture bundle asset count differs: " + bundleName);
+                foreach (var path in assets)
+                {
+                    var texture = preparedBundle.LoadAsset<Texture2D>(path);
+                    if (texture == null || !texture.isReadable || texture.mipmapCount < 2 ||
+                        (texture.format != TextureFormat.RGBA32 && texture.format != TextureFormat.RGB24))
+                        throw new InvalidOperationException("Prepared winter texture must retain readable RGBA pixels and mipmaps: " + path);
+                }
+            }
+            finally { preparedBundle.Unload(true); }
         }
 
         private static bool ShouldPackTexture(string path)
         {
-            return !IsTerrainSourceTexture(path) && !IsLooseOverrideTexture(path);
+            return !IsTerrainSourceTexture(path) && !IsPreparedTexture(path);
         }
 
         private static bool IsTerrainSourceTexture(string path)
@@ -129,7 +227,7 @@ namespace DVSeasons.AssetBundleBuild
                     normalized.IndexOf("/winter/", StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
-        private static bool IsLooseOverrideTexture(string path)
+        private static bool IsPreparedTexture(string path)
         {
             var normalized = (path ?? string.Empty).Replace('\\', '/');
             var fileName = Path.GetFileName(normalized);
@@ -140,12 +238,12 @@ namespace DVSeasons.AssetBundleBuild
                  string.Equals(fileName, "SleeperOld_d.png", StringComparison.OrdinalIgnoreCase)))
                 return true;
             if (normalized.IndexOf("/winter/", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                LooseWinterTextureNames.Contains(fileName))
+                PreparedWinterTextureNames.Contains(fileName))
                 return true;
             return false;
         }
 
-        private static void ValidateLooseTextureMirrors(List<string> sourceTextures)
+        private static void ValidatePreparedTextureMirrors(List<string> sourceTextures)
         {
             var repositoryRoot = Path.GetFullPath(Path.Combine(Application.dataPath, "../.."));
             var runtimeRoot = Path.Combine(repositoryRoot,
@@ -155,7 +253,7 @@ namespace DVSeasons.AssetBundleBuild
             for (var i = 0; i < sourceTextures.Count; i++)
             {
                 var sourceAssetPath = sourceTextures[i];
-                if (!IsLooseOverrideTexture(sourceAssetPath)) continue;
+                if (!IsPreparedTexture(sourceAssetPath)) continue;
                 var relativePath = sourceAssetPath.Substring(AssetRoot.Length + 1);
                 var runtimeRelativePath = GetCanonicalRuntimeRelativePath(relativePath);
                 var sourcePath = Path.Combine(Application.dataPath,
@@ -163,6 +261,12 @@ namespace DVSeasons.AssetBundleBuild
                         .Replace('/', Path.DirectorySeparatorChar));
                 var runtimePath = Path.Combine(runtimeRoot,
                     runtimeRelativePath.Replace('/', Path.DirectorySeparatorChar));
+                if (runtimeRelativePath == "winter/WinterBallastBalanced.png")
+                    runtimePath = Path.Combine(repositoryRoot, "Resources/Runtime/Textures/winter_ballast_balanced.png");
+                // Source archives retain one authoring copy under Assets. The old
+                // loose runtime mirrors need not be shipped just to rebuild it.
+                if (!Directory.Exists(runtimeRoot))
+                    runtimePath = Path.Combine(Application.dataPath, "DVSeasons/DV99", runtimeRelativePath);
                 if (!File.Exists(runtimePath))
                     throw new InvalidOperationException("Loose runtime texture is missing: " + runtimePath);
                 if (!FilesEqual(sourcePath, runtimePath))
@@ -171,11 +275,11 @@ namespace DVSeasons.AssetBundleBuild
                 canonicalRuntimePaths.Add(runtimeRelativePath);
                 validated++;
             }
-            if (validated != 48)
-                throw new InvalidOperationException("Expected 48 loose texture sources, found " +
+            if (validated != 50)
+                throw new InvalidOperationException("Expected 50 prepared texture sources, found " +
                     validated);
-            if (canonicalRuntimePaths.Count != 40)
-                throw new InvalidOperationException("Expected 40 canonical loose runtime textures, found " +
+            if (canonicalRuntimePaths.Count != 42)
+                throw new InvalidOperationException("Expected 42 canonical prepared runtime textures, found " +
                     canonicalRuntimePaths.Count);
         }
 
@@ -268,20 +372,24 @@ namespace DVSeasons.AssetBundleBuild
                 isRoadSurface |= path.IndexOf("/winter/", StringComparison.OrdinalIgnoreCase) >= 0 &&
                     (Path.GetFileName(path).StartsWith("MB_", StringComparison.OrdinalIgnoreCase) ||
                      path.EndsWith("/AsphaltTiling_01d_White.png", StringComparison.OrdinalIgnoreCase));
-                importer.textureType = isIceNormal
-                    ? TextureImporterType.NormalMap : TextureImporterType.Default;
+                var prepared = IsPreparedTexture(path);
+                // These were lossless loose PNGs. Store raw RGBA pixels, including
+                // the RGB normal, so bundling introduces no compression/swizzle loss.
+                importer.textureType = TextureImporterType.Default;
                 importer.sRGBTexture = !isIceNormal;
                 importer.alphaSource = TextureImporterAlphaSource.FromInput;
-                importer.alphaIsTransparency = !isIceNormal;
+                importer.alphaIsTransparency = !prepared && !isIceNormal;
                 importer.mipmapEnabled = true;
                 var isTerrainTexture = path.IndexOf("TerrainTexture",
                     StringComparison.OrdinalIgnoreCase) >= 0;
-                importer.isReadable = isTerrainTexture || isIceNormal;
-                importer.wrapMode = isTerrainTexture || isIceNormal || isIceAlbedo || isRoadSurface
+                importer.isReadable = true;
+                importer.wrapMode = prepared || isTerrainTexture || isIceNormal || isIceAlbedo || isRoadSurface
                     ? TextureWrapMode.Repeat : TextureWrapMode.Clamp;
                 importer.filterMode = FilterMode.Trilinear;
-                importer.textureCompression = TextureImporterCompression.CompressedHQ;
-                importer.maxTextureSize = path.EndsWith("/AsphaltRoad_01d.png",
+                importer.anisoLevel = 4;
+                importer.textureCompression = prepared ? TextureImporterCompression.Uncompressed : TextureImporterCompression.CompressedHQ;
+                importer.npotScale = TextureImporterNPOTScale.None;
+                importer.maxTextureSize = prepared ? 8192 : path.EndsWith("/AsphaltRoad_01d.png",
                     StringComparison.OrdinalIgnoreCase) ? 2048 : 1024;
                 importer.SaveAndReimport();
             }

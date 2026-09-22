@@ -50,7 +50,7 @@ public static class VerifyColdPowertrain
         SetFuse((FuseReference)Get(engine,"engineStarterFuseRef"));
         ((Port)Get(engine,"ignitionExtIn")).Value=1;
     }
-    static float StartSeconds(int kind,float temperature, float ambient = 25, bool de6 = false, bool interrupt = false)
+    static float StartSeconds(int kind,float temperature, float ambient = 25, bool de6 = false, bool interrupt = false, bool bypass=false, bool vanilla=true, float throttle=0)
     {
         UnityEngine.Random.InitState(54321);
         SimComponent engine;
@@ -72,18 +72,29 @@ public static class VerifyColdPowertrain
         Prepare(engine,temperature);
         lastEngine=engine;
         Set(controller,"ambient",ambient);
+        Set(controller,"IgnoreVanillaColdStarts",bypass);
         var starts=Get(controller,"starts");
         var state=starts.GetType().GetMethod("GetOrCreateValue").Invoke(starts,new object[]{engine});
+        Set(state,"Vanilla",vanilla);
         if(de6)
         {
             Set(state,"De6",true);
             Set(state,"Primer",new Port("primerThrottle",new PortDefinition(PortType.EXTERNAL_IN,PortValueType.GENERIC,"EXT_IN"),0));
+            Set(state,"Throttle",new Port("throttle",new PortDefinition(PortType.EXTERNAL_IN,PortValueType.CONTROL,"EXT_IN"),throttle));
         }
         for(int i=1;i<=15000;i++)
         {
             if(interrupt && i==100) ((Port)Get(engine,"ignitionExtIn")).Value=0;
             if(interrupt && i==101) ((Port)Get(engine,"ignitionExtIn")).Value=1;
             engine.Tick(.02f);
+            if(i==50 && ambient<0 && temperature<40 && !(bypass && vanilla))
+            {
+                Require((bool)Get(state,"Cranking"),"Cold starter countdown did not activate");
+                float remaining=(float)Get(state,"Remaining");
+                Require(remaining>0 && remaining<12,"Countdown did not use live starter progress: "+remaining);
+            }
+            if(i==101 && interrupt && ambient<0)
+                Require((float)Get(state,"Remaining")>4.5f,"Cancelled start did not reset the hint countdown");
             if(((Port)Get(engine,"engineOnReadOut")).Value>.5f) return i*.02f;
         }
         throw new Exception("Diesel failed to start: "+kind+", "+temperature);
@@ -115,7 +126,7 @@ public static class VerifyColdPowertrain
         {
             foreach(var t in new[]{typeof(DieselEnginePowerSource),typeof(DieselEngineDirectDrive)})
                 harmony.Patch(t.GetMethod("Tick"),prefix:new HarmonyMethod(controllerType.GetMethod("TimedStarter",All)),
-                    postfix:new HarmonyMethod(controllerType.GetMethod("EngineWarmth",All)));
+                    postfix:new HarmonyMethod(controllerType.GetMethod("TimedStarterState",All)));
             harmony.Patch(typeof(DieselEngineDirect).GetMethod("SimulateTorque",All),prefix:new HarmonyMethod(controllerType.GetMethod("DirectStarter",All)));
             harmony.Patch(typeof(DieselEngineDirect).GetMethod("Tick"),postfix:new HarmonyMethod(controllerType.GetMethod("StabilizeDe6",All)));
             harmony.Patch(typeof(SimBattery).GetMethod("Tick"),transpiler:new HarmonyMethod(controllerType.GetMethod("BatteryLoads",All)),
@@ -131,6 +142,16 @@ public static class VerifyColdPowertrain
                 float interrupted=StartSeconds(kind,-10,-10,false,true);
                 Require(interrupted>6.95f,"Releasing starter retained progress: "+kind+" / "+interrupted);
                 Debug.Log("DVSeasons starter verified kind="+kind+": warm="+warm+"s, cold="+cold+"s");
+                float bypassed=StartSeconds(kind,-30,-30,kind==2,false,true);
+                Require(Math.Abs(bypassed-warm)<.025f,"Vanilla bypass did not restore native start timing: "+kind);
+                if(kind==2)
+                {
+                    var direct=(DieselEngineDirect)lastEngine;direct.ignitionExtIn.Value=0;
+                    for(int i=0;i<250;i++)direct.Tick(.02f);
+                    Require(direct.engineOnReadOut.Value==1,"Bypassed DE6 still required primer");
+                }
+                float custom=StartSeconds(kind,-30,-30,false,false,true,false);
+                Require(Math.Abs(custom-cold)<.025f,"Vanilla bypass changed a custom engine");
             }
             VerifyDe6();
             VerifyWarmRestarts();
@@ -213,21 +234,69 @@ public static class VerifyColdPowertrain
         StartSeconds(2,-10,-10,true);
         var engine=(DieselEngineDirect)lastEngine;
         engine.ignitionExtIn.Value=0;
-        for(int i=0;i<105;i++)engine.Tick(.02f);
-        Require(engine.engineOnReadOut.Value==0,"DE6 without primer did not stall");
+        for(int i=0;i<245;i++)engine.Tick(.02f);
+        Require(engine.engineOnReadOut.Value==1,"DE6 stalled before five-second response window elapsed");
+        for(int i=0;i<10;i++)engine.Tick(.02f);
+        Require(engine.engineOnReadOut.Value==0,"DE6 without either control did not stall after five seconds");
         StartSeconds(2,-10,-10,true);
         engine=(DieselEngineDirect)lastEngine;engine.ignitionExtIn.Value=0;
         var starts=Get(controller,"starts");
         var state=starts.GetType().GetMethod("GetOrCreateValue").Invoke(starts,new object[]{engine});
         var primer=(Port)Get(state,"Primer");
-        for(int i=0;i<50;i++)engine.Tick(.02f);
+        var idle=Get(state,"Idle");
+        Require((float)idle.GetType().GetProperty("RemainingSeconds").GetValue(idle,null)==3,"Primer hint counted down before lever opened");
+        for(int i=0;i<225;i++)engine.Tick(.02f);
         primer.Value=1;
-        for(int i=0;i<151;i++)engine.Tick(.02f);
+        for(int i=0;i<50;i++)engine.Tick(.02f);
+        float left=(float)idle.GetType().GetProperty("RemainingSeconds").GetValue(idle,null);
+        Require(Math.Abs(left-2)<.025f,"Primer hint did not track actual continuous hold");
+        for(int i=0;i<101;i++)engine.Tick(.02f);
         Require(!(bool)Get(state,"Idle").GetType().GetProperty("Active").GetValue(Get(state,"Idle"),null),"DE6 primer hold did not finish");
         primer.Value=0;
         for(int i=0;i<100;i++)engine.Tick(.02f);
         Require(engine.engineOnReadOut.Value==1,"DE6 stalled after completing primer sequence");
-        Debug.Log("DVSeasons DE6 native engine verified: missed primer stalls; 1s response + 3s hold succeeds.");
+
+        foreach(bool preset in new[]{false,true})
+        {
+            StartSeconds(2,-10,-10,true,throttle:preset?1:0);
+            engine=(DieselEngineDirect)lastEngine;engine.ignitionExtIn.Value=0;
+            state=starts.GetType().GetMethod("GetOrCreateValue").Invoke(starts,new object[]{engine});
+            var throttle=(Port)Get(state,"Throttle");
+            if(!preset)for(int i=0;i<225;i++)engine.Tick(.02f);
+            throttle.Value=1;
+            for(int i=0;i<50;i++)engine.Tick(.02f);
+            idle=Get(state,"Idle");
+            left=(float)idle.GetType().GetProperty("RemainingSeconds").GetValue(idle,null);
+            Require(Math.Abs(left-2)<.025f,"Maximum cab throttle did not advance the hold countdown");
+            for(int i=0;i<101;i++)engine.Tick(.02f);
+            Require(!(bool)idle.GetType().GetProperty("Active").GetValue(idle,null),"Cab throttle did not complete stabilization");
+            throttle.Value=0;
+            for(int i=0;i<100;i++)engine.Tick(.02f);
+            Require(engine.engineOnReadOut.Value==1,"DE6 with cab throttle alone did not remain running");
+        }
+        StartSeconds(2,-10,-10,true,throttle:.99f);
+        engine=(DieselEngineDirect)lastEngine;engine.ignitionExtIn.Value=0;
+        for(int i=0;i<255;i++)engine.Tick(.02f);
+        Require(engine.engineOnReadOut.Value==0,"Partial cab throttle incorrectly replaced the primer");
+
+        StartSeconds(2,-10,-10,true,throttle:1);
+        engine=(DieselEngineDirect)lastEngine;engine.ignitionExtIn.Value=0;
+        state=starts.GetType().GetMethod("GetOrCreateValue").Invoke(starts,new object[]{engine});
+        for(int i=0;i<50;i++)engine.Tick(.02f);
+        ((Port)Get(state,"Throttle")).Value=0;
+        engine.Tick(.02f);
+        Require(engine.engineOnReadOut.Value==0,"Interrupted full-throttle hold did not stall");
+
+        StartSeconds(2,-10,-10,true);
+        engine=(DieselEngineDirect)lastEngine;engine.ignitionExtIn.Value=0;
+        state=starts.GetType().GetMethod("GetOrCreateValue").Invoke(starts,new object[]{engine});
+        ((Port)Get(state,"Primer")).Value=1;
+        for(int i=0;i<50;i++)engine.Tick(.02f);
+        ((Port)Get(state,"Throttle")).Value=1;
+        ((Port)Get(state,"Primer")).Value=0;
+        for(int i=0;i<101;i++)engine.Tick(.02f);
+        Require(engine.engineOnReadOut.Value==1 && !(bool)Get(state,"Idle").GetType().GetProperty("Active").GetValue(Get(state,"Idle"),null),"Continuous handover between primer and full throttle reset stabilization");
+        Debug.Log("DVSeasons DE6 native engine verified: 5s response window; 3s primer or maximum cab throttle hold; preset throttle, partial throttle rejection, interruption and continuous handover.");
     }
     static void VerifySurfacesAndLamp(Assembly mod)
     {

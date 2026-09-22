@@ -1,9 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using DVSeasons.Core;
 using UnityEngine;
-using UnityEngine.Rendering;
 
 namespace DVSeasons.Mod
 {
@@ -20,7 +18,6 @@ namespace DVSeasons.Mod
         private const float TextureEnableThreshold = 0.12f;
         private const float TextureDisableThreshold = 0.04f;
         private const float ScanIntervalSeconds = 5f;
-        private const int FallbackTextureSize = 512;
         private const float IceWorldTileSize = 22f;
 
         private static readonly Color IceBaseColor = new Color(0.43f, 0.57f, 0.65f, 1f);
@@ -51,9 +48,9 @@ namespace DVSeasons.Mod
         private sealed class WaterRendererRecord
         {
             public MeshRenderer Renderer;
+            public MeshFilter Filter;
             public Mesh Mesh;
             public int Submesh;
-            public bool OwnsMesh;
         }
 
         private readonly SeasonAssetBundleRepository texturePack;
@@ -66,7 +63,6 @@ namespace DVSeasons.Mod
         private Texture2D iceNormal;
         private Texture2D iceAlbedo;
         private Material iceOverlayMaterial;
-        private bool ownsIceNormal;
         private bool missingNormalLogged;
         private bool missingAlbedoLogged;
         private float nextNormalLoadAttempt;
@@ -75,7 +71,7 @@ namespace DVSeasons.Mod
         public WaterIceController(SeasonAssetBundleRepository texturePack)
         {
             this.texturePack = texturePack ?? throw new ArgumentNullException(nameof(texturePack));
-            waterScan=new IncrementalSceneScan<MeshRenderer>(ScanIntervalSeconds,192,BindWaterRenderer);
+            waterScan=new IncrementalSceneScan<MeshRenderer>(ScanIntervalSeconds,192,BindWaterRenderer,true);
         }
 
         /// <param name="iceAmount">
@@ -99,17 +95,12 @@ namespace DVSeasons.Mod
             foreach (var record in materials.Values) Restore(record);
             materials.Clear();
 
-            foreach (var record in renderers.Values)
-                if (record.OwnsMesh && record.Mesh != null)
-                    UnityEngine.Object.Destroy(record.Mesh);
-
-            if (ownsIceNormal && iceNormal != null) UnityEngine.Object.Destroy(iceNormal);
-            if (iceAlbedo != null) UnityEngine.Object.Destroy(iceAlbedo);
+            // Textures and source meshes belong to the repository/game. They can
+            // also be in use by the puddle pass or another world-water renderer.
             if (iceOverlayMaterial != null) UnityEngine.Object.Destroy(iceOverlayMaterial);
             iceNormal = null;
             iceAlbedo = null;
             iceOverlayMaterial = null;
-            ownsIceNormal = false;
             missingNormalLogged = false;
             missingAlbedoLogged = false;
             nextNormalLoadAttempt = 0f;
@@ -128,11 +119,8 @@ namespace DVSeasons.Mod
             if (Time.realtimeSinceStartup < nextNormalLoadAttempt) return;
             nextNormalLoadAttempt = Time.realtimeSinceStartup + ScanIntervalSeconds;
 
-            // TryLoadPixels both validates the agreed winter asset key and asks the
-            // repository to load/reload its bundle after DV changes worlds.
-            Color32[] fallbackPixels;
-            if (!texturePack.TryLoadPixels(IceNormalAssetName, SeasonKind.Winter,
-                FallbackTextureSize, FallbackTextureSize, out fallbackPixels))
+            if (!texturePack.TryLoadTexture(IceNormalAssetName, SeasonKind.Winter,
+                out iceNormal))
             {
                 if (!missingNormalLogged)
                 {
@@ -143,54 +131,8 @@ namespace DVSeasons.Mod
                 return;
             }
 
-            // Prefer the original AssetBundle Texture2D. It retains compression,
-            // authored mip maps and the linear (non-sRGB) normal-map import flag.
-            var bundle = texturePack.Bundle;
-            if (bundle != null)
-            {
-                var assetNames = bundle.GetAllAssetNames();
-                for (var i = 0; i < assetNames.Length; i++)
-                {
-                    var assetName = assetNames[i];
-                    var fileName = Path.GetFileNameWithoutExtension(
-                        assetName.Replace('/', Path.DirectorySeparatorChar));
-                    if (!string.Equals(fileName, IceNormalAssetName,
-                        StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    if (assetName.IndexOf("/winter/", StringComparison.OrdinalIgnoreCase) < 0)
-                        continue;
-
-                    var packed = bundle.LoadAsset<Texture2D>(assetName);
-                    if (packed == null) continue;
-                    packed.wrapMode = TextureWrapMode.Repeat;
-                    packed.filterMode = FilterMode.Trilinear;
-                    packed.anisoLevel = 4;
-                    packed.hideFlags |= HideFlags.DontUnloadUnusedAsset;
-                    iceNormal = packed;
-                    ownsIceNormal = false;
-                    missingNormalLogged = false;
-                    Debug.Log("[DVSeasons] Loaded winter water ice normal from the AssetBundle.");
-                    return;
-                }
-            }
-
-            // Loose PNG overrides have no Texture2D handle in the repository. Build
-            // a linear repeating texture from the already scaled pixels in that case.
-            var generated = new Texture2D(FallbackTextureSize, FallbackTextureSize,
-                TextureFormat.RGBA32, true, true)
-            {
-                name = "DVSeasons Water Ice Normal",
-                wrapMode = TextureWrapMode.Repeat,
-                filterMode = FilterMode.Trilinear,
-                anisoLevel = 4,
-                hideFlags = HideFlags.HideAndDontSave
-            };
-            generated.SetPixels32(fallbackPixels);
-            generated.Apply(true, false);
-            iceNormal = generated;
-            ownsIceNormal = true;
             missingNormalLogged = false;
-            Debug.Log("[DVSeasons] Loaded loose winter water ice normal override.");
+            Debug.Log("[DVSeasons] Loaded winter water ice normal directly from the texture repository.");
         }
 
         private void TryLoadIceAlbedo()
@@ -198,10 +140,8 @@ namespace DVSeasons.Mod
             if (Time.realtimeSinceStartup < nextAlbedoLoadAttempt) return;
             nextAlbedoLoadAttempt = Time.realtimeSinceStartup + ScanIntervalSeconds;
 
-            Color32[] pixels;
-            const int size = 1024;
-            if (!texturePack.TryLoadPixels(IceAlbedoAssetName, SeasonKind.Winter,
-                size, size, out pixels))
+            if (!texturePack.TryLoadTexture(IceAlbedoAssetName, SeasonKind.Winter,
+                out iceAlbedo))
             {
                 if (!missingAlbedoLogged)
                 {
@@ -212,17 +152,6 @@ namespace DVSeasons.Mod
                 return;
             }
 
-            iceAlbedo = new Texture2D(size, size, TextureFormat.RGBA32, true, false)
-            {
-                name = "DVSeasons Water Ice Albedo",
-                wrapMode = TextureWrapMode.Repeat,
-                filterMode = FilterMode.Trilinear,
-                anisoLevel = 4,
-                hideFlags = HideFlags.HideAndDontSave
-            };
-            iceAlbedo.SetPixels32(pixels);
-            iceAlbedo.Apply(true, false);
-
             // Use the bundled world-projected shader with an explicit tint.
             // Stock Unlit/Transparent has no tint control, so it stayed bright
             // at night. Lighting is supplied every frame from the weather driver.
@@ -230,7 +159,6 @@ namespace DVSeasons.Mod
             if (shader == null || !shader.isSupported)
             {
                 Debug.LogWarning("[DVSeasons] A transparent shader for the water ice overlay is unavailable.");
-                UnityEngine.Object.Destroy(iceAlbedo);
                 iceAlbedo = null;
                 return;
             }
@@ -242,6 +170,7 @@ namespace DVSeasons.Mod
                 renderQueue = 3100,
                 hideFlags = HideFlags.HideAndDontSave
             };
+            iceOverlayMaterial.SetFloat("_TileSize", IceWorldTileSize);
             missingAlbedoLogged = false;
             Debug.Log("[DVSeasons] Loaded seamless winter ice albedo for world water using shader '" +
                 shader.name + "' after the BGWater pass.");
@@ -250,7 +179,6 @@ namespace DVSeasons.Mod
         private void BindWaterRenderer(MeshRenderer renderer)
         {
             var added = 0;
-            var projectedCount = 0;
             if (renderer == null) return;
             var filter = renderer.GetComponent<MeshFilter>();
             if (filter == null || filter.sharedMesh == null) return;
@@ -264,22 +192,20 @@ namespace DVSeasons.Mod
                     materials.Add(waterMaterial.GetInstanceID(),Capture(waterMaterial));
                 var key = ((long)(uint)renderer.GetInstanceID() << 32) | (uint)submesh;
                 if (renderers.ContainsKey(key)) continue;
-                var projected = CreateWorldProjectedSubmesh(renderer,
-                    filter.sharedMesh, submesh);
-                if (projected != null) projectedCount++;
+                // WaterIceOverlay already projects world XZ in its vertex shader.
+                // Reuse even non-readable meshes: no CPU vertex/UV copy is needed.
                 renderers.Add(key, new WaterRendererRecord
                 {
                     Renderer = renderer,
-                    Mesh = projected ?? filter.sharedMesh,
-                    Submesh = projected == null ? submesh : 0,
-                    OwnsMesh = projected != null
+                    Filter = filter,
+                    Mesh = filter.sharedMesh,
+                    Submesh = submesh
                 });
                 added++;
             }
             if (added > 0)
                 Debug.Log("[DVSeasons] Bound " + added +
-                    " world-water renderer submesh(es) for the winter ice albedo; " +
-                    projectedCount + " received world-projected UVs.");
+                    " world-water renderer submesh(es) for the winter ice albedo using shader world projection.");
         }
 
         internal static Color OverlayTint(float amount, float lightFactor)
@@ -299,7 +225,6 @@ namespace DVSeasons.Mod
             // Keep the native water colour and reflections visible. 0.2.5 used
             // 82% alpha and reduced the lake to an opaque grey sheet.
             var tint = OverlayTint(amount, lightFactor);
-            iceOverlayMaterial.SetFloat("_TileSize", IceWorldTileSize);
             if (iceOverlayMaterial.HasProperty("_Color"))
                 iceOverlayMaterial.SetColor("_Color", tint);
             if (iceOverlayMaterial.HasProperty("_TintColor"))
@@ -308,52 +233,17 @@ namespace DVSeasons.Mod
             foreach (var record in renderers.Values)
             {
                 var renderer = record.Renderer;
-                if (renderer == null || record.Mesh == null || !renderer.enabled ||
+                if (renderer == null || record.Filter == null || !renderer.enabled ||
                     !renderer.gameObject.activeInHierarchy) continue;
+                // Streaming/batching may replace the shared mesh after discovery.
+                // Follow the current GPU mesh instead of retaining a destroyed or
+                // obsolete surface indefinitely; no vertex data is read back.
+                record.Mesh = record.Filter.sharedMesh;
+                if (record.Mesh == null || record.Submesh >= record.Mesh.subMeshCount) continue;
                 var matrix = Matrix4x4.Translate(Vector3.up * 0.035f) *
                     renderer.localToWorldMatrix;
                 Graphics.DrawMesh(record.Mesh, matrix, iceOverlayMaterial,
                     renderer.gameObject.layer, null, record.Submesh, null, false, false);
-            }
-        }
-
-        private static Mesh CreateWorldProjectedSubmesh(MeshRenderer renderer,
-            Mesh source, int submesh)
-        {
-            try
-            {
-                var vertices = source.vertices;
-                if (vertices == null || vertices.Length == 0) return null;
-                var indices = source.GetIndices(submesh);
-                if (indices == null || indices.Length == 0) return null;
-
-                var uv = new Vector2[vertices.Length];
-                var localToWorld = renderer.localToWorldMatrix;
-                for (var i = 0; i < vertices.Length; i++)
-                {
-                    var world = localToWorld.MultiplyPoint3x4(vertices[i]);
-                    uv[i] = new Vector2(world.x / IceWorldTileSize,
-                        world.z / IceWorldTileSize);
-                }
-
-                var projected = new Mesh
-                {
-                    name = source.name + " [DVSeasons World-Projected Ice]",
-                    hideFlags = HideFlags.HideAndDontSave,
-                    indexFormat = vertices.Length > ushort.MaxValue
-                        ? IndexFormat.UInt32 : IndexFormat.UInt16,
-                    vertices = vertices,
-                    uv = uv
-                };
-                projected.SetIndices(indices, source.GetTopology(submesh), 0, false);
-                projected.bounds = source.bounds;
-                return projected;
-            }
-            catch (Exception exception)
-            {
-                Debug.LogWarning("[DVSeasons] Could not create world-projected ice UVs for water mesh '" +
-                    source.name + "'; keeping its original UVs. " + exception.Message);
-                return null;
             }
         }
 

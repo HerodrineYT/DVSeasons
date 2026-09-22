@@ -1,6 +1,7 @@
 using System;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.XR;
 
 namespace DVSeasons.Mod
 {
@@ -13,6 +14,8 @@ namespace DVSeasons.Mod
         private Material material;
         private CommandBuffer commands;
         private bool hdr;
+        private bool stereo;
+        private RenderTextureDescriptor stereoDescriptor;
         private float strength;
         private static readonly int Buffer = Shader.PropertyToID("_DVSeasonsGlareCopy");
         public float Strength => strength;
@@ -32,16 +35,32 @@ namespace DVSeasons.Mod
                 material = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
             }
             material.SetFloat("_Strength", strength);
-            if (camera == next && hdr == next.allowHDR && commands != null) return;
+            var nextStereo = next.stereoEnabled && XRSettings.enabled;
+            var nextDescriptor = nextStereo ? XRSettings.eyeTextureDesc : default(RenderTextureDescriptor);
+            if (camera == next && hdr == next.allowHDR && stereo == nextStereo && commands != null &&
+                (!nextStereo || SameStereoLayout(stereoDescriptor, nextDescriptor))) return;
             Unbind(); camera = next; hdr = camera.allowHDR;
+            stereo = nextStereo; stereoDescriptor = nextDescriptor;
             camera.depthTextureMode |= DepthTextureMode.Depth;
             commands = new CommandBuffer { name = "DVSeasons snow highlight reduction" };
-            commands.GetTemporaryRT(Buffer, -1, -1, 0, FilterMode.Bilinear,
-                hdr ? RenderTextureFormat.DefaultHDR : RenderTextureFormat.Default);
+            var format = hdr ? RenderTextureFormat.DefaultHDR : RenderTextureFormat.Default;
+            if (stereo)
+                StereoRenderSupport.GetTemporaryRT(commands, Buffer, camera, format, FilterMode.Bilinear);
+            else
+                // Preserve the original mono color-space behavior.
+                commands.GetTemporaryRT(Buffer, -1, -1, 0, FilterMode.Bilinear, format);
             commands.Blit(BuiltinRenderTextureType.CameraTarget, Buffer);
             commands.Blit(Buffer, BuiltinRenderTextureType.CameraTarget, material, 0);
             commands.ReleaseTemporaryRT(Buffer);
             camera.AddCommandBuffer(CameraEvent.BeforeImageEffects, commands);
+        }
+        private static bool SameStereoLayout(RenderTextureDescriptor previous, RenderTextureDescriptor next)
+        {
+            // Compare only fields retained by the color-copy descriptor, without
+            // boxing descriptors on every frame. Rebuild if XR resolution changes.
+            return previous.width == next.width && previous.height == next.height &&
+                previous.dimension == next.dimension && previous.volumeDepth == next.volumeDepth &&
+                previous.vrUsage == next.vrUsage && previous.useDynamicScale == next.useDynamicScale;
         }
         private void Unbind()
         {

@@ -20,6 +20,9 @@ namespace DVSeasons.Mod
         { return IsActive ? Service.GetCabinTemperature(car) : float.NaN; }
         internal static WindowWinterClimate CustomClimate(TrainCar car)
         { return IsActive ? Service.CustomClimate(car) : null; }
+        internal static bool UsesNetworkClimate { get { return IsActive && Service.UsesNetworkClimate; } }
+        internal static WindowWinterClimate NetworkClimate(TrainCar car)
+        { return IsActive ? Service.NetworkClimate(car) : null; }
         internal static void RestoreCustomClimates(List<CabFrostState> records)
         { if (IsActive) Service.RestoreCustomClimates(records); }
         internal static void SaveCustomClimates(IDictionary<string, WindowClimateState> destination)
@@ -36,6 +39,10 @@ namespace DVSeasons.Mod
         private readonly CabHeaterSwitchSystem switches;
         private readonly Dm1uCabControls dm1u;
         private readonly CabEngineHeating engineHeating = new CabEngineHeating();
+        private readonly Dictionary<string,WindowWinterClimate> networkClimates = new Dictionary<string,WindowWinterClimate>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> climateIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly List<string> expiredClimates = new List<string>();
+        internal bool UsesNetworkClimate => network.IsSessionActive && !network.IsAuthority;
         public bool EngineHeatingWithoutSwitch = true;
         public float OutsideTemperature, SnowCoverage;
         private readonly Dictionary<string,float> states = new Dictionary<string,float>(StringComparer.OrdinalIgnoreCase);
@@ -85,6 +92,7 @@ namespace DVSeasons.Mod
                 (UnityModManager.UI.Instance == null || !UnityModManager.UI.Instance.Opened) && shortcut.Down()) ToggleCurrent();
             if (Time.realtimeSinceStartup < nextScan) return;
             nextScan = Time.realtimeSinceStartup + .5f;
+            engineHeating.PruneDestroyed();
             if (network.IsSessionActive && !network.IsAuthority && !receivedSnapshot) network.RequestState();
             foreach(var car in RailSnowGameSource.GetCars())
             {
@@ -113,12 +121,36 @@ namespace DVSeasons.Mod
             return Active && engineHeating.TryGetLevel(car, EngineHeatingWithoutSwitch, out level, out engineSource) && engineSource;
         }
         internal WindowWinterClimate CustomClimate(TrainCar car)
-        { return Active ? engineHeating.GetClimate(car, EngineHeatingWithoutSwitch, OutsideTemperature, SnowCoverage) : null; }
+        { return !Active ? null : UsesNetworkClimate ? NetworkClimate(car)
+            : engineHeating.GetClimate(car, EngineHeatingWithoutSwitch, OutsideTemperature, SnowCoverage); }
+        internal WindowWinterClimate NetworkClimate(TrainCar car)
+        {
+            WindowWinterClimate climate;
+            return car != null && !string.IsNullOrEmpty(car.CarGUID) && networkClimates.TryGetValue(car.CarGUID, out climate) ? climate : null;
+        }
+        internal void ApplyThermalNetworkState(VehicleThermalNetworkState[] snapshot)
+        {
+            if (!UsesNetworkClimate || !VehicleThermalNetworkState.IsValid(snapshot)) return;
+            climateIds.Clear();
+            foreach (var state in snapshot)
+            {
+                if (!state.HasClimate) continue;
+                climateIds.Add(state.CarId);
+                WindowWinterClimate climate;
+                if (!networkClimates.TryGetValue(state.CarId, out climate))
+                    networkClimates.Add(state.CarId, climate = new WindowWinterClimate());
+                climate.Restore(state.ClimateState());
+            }
+            expiredClimates.Clear();
+            foreach (var id in networkClimates.Keys) if (!climateIds.Contains(id)) expiredClimates.Add(id);
+            foreach (var id in expiredClimates) networkClimates.Remove(id);
+        }
         internal void RestoreCustomClimates(List<CabFrostState> records) { engineHeating.RestoreClimates(records); }
         internal void SaveCustomClimates(IDictionary<string, WindowClimateState> destination) { engineHeating.SaveClimates(destination); }
         public float GetCabinTemperature(TrainCar car)
         {
             var climate = CustomClimate(car);
+            if (UsesNetworkClimate) return climate != null && climate.IsInitialized ? climate.CabinTemperature : float.NaN;
             return climate != null ? climate.CabinTemperature : WinterWindowController.CabinTemperature(car);
         }
         public float GetLevelById(string id) { return Active ? switches.GetLevel(id) : 0; }
@@ -168,6 +200,7 @@ namespace DVSeasons.Mod
         {
             Active=false; if(CabHeating.Service==this) CabHeating.Service=null;
             switches.Reset();dm1u.Reset();engineHeating.Clear();states.Clear();nextScan=0;
+            networkClimates.Clear(); climateIds.Clear(); expiredClimates.Clear();
             receivedSnapshot=false;
             if(heaterNetwork!=null) heaterNetwork.SetHeaters(states,false);
         }

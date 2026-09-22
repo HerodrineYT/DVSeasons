@@ -13,6 +13,7 @@ namespace DVSeasons.Mod
         private sealed class Entry
         {
             public TrainCar Car;
+            public string Id;
             public SimulationFlow Flow;
             public Port EngineOn,EngineRpm;
             public float Melted;
@@ -23,6 +24,28 @@ namespace DVSeasons.Mod
         private readonly Dictionary<int,Entry> entries=new Dictionary<int,Entry>();
         private readonly List<int> expired=new List<int>();
         private readonly Dictionary<string,float> saved = new Dictionary<string,float>(StringComparer.OrdinalIgnoreCase);
+        private bool authority = true;
+        public void SetNetworkAuthority(bool value)
+        {
+            if (authority == value) return;
+            if (!value) Reset();
+            authority = value;
+        }
+        public void ApplyNetworkState(VehicleThermalNetworkState[] snapshot)
+        {
+            if (authority || !VehicleThermalNetworkState.IsValid(snapshot)) return;
+            saved.Clear();
+            foreach (var state in snapshot) saved[state.CarId] = state.MeltedSnow;
+            foreach (var entry in entries.Values)
+                entry.Melted = Melted(entry.Car);
+        }
+        public float Melted(TrainCar car)
+        {
+            if (car == null) return 0;
+            Entry entry; float value;
+            if (authority && entries.TryGetValue(car.GetInstanceID(), out entry)) return entry.Melted;
+            return !string.IsNullOrEmpty(car.CarGUID) && saved.TryGetValue(car.CarGUID, out value) ? value : 0;
+        }
         public void Restore(List<CarSnowState> records)
         {
             Reset(); if(records==null) return;
@@ -47,7 +70,13 @@ namespace DVSeasons.Mod
                 {
                     float melted=0;
                     if(!string.IsNullOrEmpty(car.CarGUID)) saved.TryGetValue(car.CarGUID,out melted);
-                    entry=new Entry {Car=car,Melted=melted};entries.Add(id,entry);
+                    entry=new Entry {Car=car,Id=car.CarGUID,Melted=melted};entries.Add(id,entry);
+                }
+                if (entry.Id != car.CarGUID)
+                {
+                    entry.Id = car.CarGUID; entry.Melted = 0;
+                    if (!string.IsNullOrEmpty(entry.Id)) saved.TryGetValue(entry.Id, out entry.Melted);
+                    entry.StateKnown = false; entry.Flow = null;
                 }
                 bool battery=car.carType==TrainCarType.LocoMicroshunter;
                 bool steam=car.carType==TrainCarType.LocoSteamHeavy || car.carType==TrainCarType.LocoS060;
@@ -68,8 +97,8 @@ namespace DVSeasons.Mod
                         " (detector " + entry.Detector + ").");
                 entry.StateKnown=true;
                 entry.Running=running;
-                entry.Melted=LocomotiveSnowHeat.Advance(entry.Melted,running,steam,battery,snowfall,seconds);
-                if(!string.IsNullOrEmpty(car.CarGUID)) saved[car.CarGUID]=entry.Melted;
+                entry.Melted=authority ? LocomotiveSnowHeat.Advance(entry.Melted,running,steam,battery,snowfall,seconds) : Melted(car);
+                if(authority && !string.IsNullOrEmpty(car.CarGUID)) saved[car.CarGUID]=entry.Melted;
                 Report(entry,steam,battery);
             }
             expired.Clear();foreach(var pair in entries) if(pair.Value.Car==null) expired.Add(pair.Key);
@@ -80,8 +109,17 @@ namespace DVSeasons.Mod
             var car=source as TrainCar;
             if(car==null && source!=null) car=source.GetComponentInParent<TrainCar>();
             if(car==null) return 1f;
-            Entry entry;return entries.TryGetValue(car.GetInstanceID(),out entry)
-                ? LocomotiveSnowHeat.VisibleRemaining(entry.Melted) : 1f;
+            return LocomotiveSnowHeat.VisibleRemaining(Melted(car));
+        }
+
+        public float Heating(Component source)
+        {
+            var car=source as TrainCar;
+            if(car==null && source!=null) car=source.GetComponentInParent<TrainCar>();
+            if(car==null || car.carType==TrainCarType.LocoMicroshunter) return 0f;
+            Entry entry;
+            if(!entries.TryGetValue(car.GetInstanceID(),out entry) || !entry.Running) return 0f;
+            return car.carType==TrainCarType.LocoSteamHeavy || car.carType==TrainCarType.LocoS060 ? 1f : .5f;
         }
 
         // Interior and streamed exterior colliders can be detached from the

@@ -8,7 +8,7 @@ namespace DVSeasons.Mod
     // Logical state only: no render targets, transient instance IDs or wall clock.
     [Serializable] internal sealed class SnowWorldSave
     {
-        public int Version = 1;
+        public int Version = 2;
         public bool HasCoverage;
         public float Coverage;
         public List<RailSnowStamp> Rails = new List<RailSnowStamp>();
@@ -16,6 +16,7 @@ namespace DVSeasons.Mod
         public List<CabFrostState> Cabs = new List<CabFrostState>();
         public List<VehicleSnowMask> VehicleMasks = new List<VehicleSnowMask>();
         public List<WindowSnowMask> WindowMasks = new List<WindowSnowMask>();
+        public List<VehicleSideSnowState> VehicleSides = new List<VehicleSideSnowState>();
         public static bool Unit(float value) { return value >= 0 && value <= 1; }
         public string Encode()
         {
@@ -43,6 +44,12 @@ namespace DVSeasons.Mod
                     }
                     writer.Write(WindowMasks.Count);
                     foreach(var m in WindowMasks) { WriteText(writer,m.Id);WriteText(writer,m.Packed); }
+                    if(Version>=2)
+                    {
+                        writer.Write(VehicleSides.Count);
+                        foreach(var s in VehicleSides)
+                        { WriteText(writer,s.Id);writer.Write(s.Amount.x);writer.Write(s.Amount.y);writer.Write(s.Amount.z);writer.Write(s.Amount.w); }
+                    }
                 }
                 return Convert.ToBase64String(output.ToArray());
             }
@@ -54,8 +61,10 @@ namespace DVSeasons.Mod
             using(var zip=new System.IO.Compression.DeflateStream(input,System.IO.Compression.CompressionMode.Decompress))
             using(var reader=new System.IO.BinaryReader(zip))
             {
-                if(reader.ReadInt32()!=0x4456534e || reader.ReadInt32()!=1) throw new System.IO.InvalidDataException("Unknown snow snapshot version");
-                var result=new SnowWorldSave {HasCoverage=reader.ReadBoolean(),Coverage=reader.ReadSingle()};
+                if(reader.ReadInt32()!=0x4456534e) throw new System.IO.InvalidDataException("Unknown snow snapshot format");
+                int version=reader.ReadInt32();
+                if(version!=1 && version!=2) throw new System.IO.InvalidDataException("Unknown snow snapshot version");
+                var result=new SnowWorldSave {Version=version,HasCoverage=reader.ReadBoolean(),Coverage=reader.ReadSingle()};
                 int count=ReadCount(reader,65536);
                 for(int i=0;i<count;i++) result.Rails.Add(new RailSnowStamp {A=ReadVector(reader),B=ReadVector(reader),Width=ReadVector(reader),Age=reader.ReadSingle()});
                 count=ReadCount(reader,16384);
@@ -69,6 +78,12 @@ namespace DVSeasons.Mod
                     Area=new Vector4(reader.ReadSingle(),reader.ReadSingle(),reader.ReadSingle(),reader.ReadSingle())});
                 count=ReadCount(reader,65536);
                 for(int i=0;i<count;i++) result.WindowMasks.Add(new WindowSnowMask {Id=ReadText(reader,4096),Packed=ReadText(reader,60000)});
+                if(version>=2)
+                {
+                    count=ReadCount(reader,16384);
+                    for(int i=0;i<count;i++) result.VehicleSides.Add(new VehicleSideSnowState {Id=ReadText(reader,80),
+                        Amount=new Vector4(reader.ReadSingle(),reader.ReadSingle(),reader.ReadSingle(),reader.ReadSingle())});
+                }
                 if(reader.BaseStream.ReadByte()!=-1) throw new System.IO.InvalidDataException("Trailing snow data");
                 return result;
             }
@@ -97,6 +112,7 @@ namespace DVSeasons.Mod
         { return Math.Abs(v.x)<1000000 && Math.Abs(v.y)<1000000 && Math.Abs(v.z)<1000000; }
     }
     [Serializable] internal sealed class CarSnowState { public string Id; public float Melted; }
+    [Serializable] internal sealed class VehicleSideSnowState { public string Id; public Vector4 Amount; }
     [Serializable] internal sealed class CabFrostState { public string Id; public WindowClimateState Climate; }
     [Serializable] internal sealed class WindowSnowMask { public string Id, Packed; }
     [Serializable] internal sealed class VehicleSnowMask

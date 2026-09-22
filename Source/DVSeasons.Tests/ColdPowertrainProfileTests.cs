@@ -34,17 +34,30 @@ namespace DVSeasons.Tests
         public void De6MissedPrimerAndInterruptedHoldStallButCompleteHoldPasses()
         {
             var idle = new ColdIdleStabilization(); idle.Begin();
-            Assert.False(idle.Advance(1.99f, false));
+            Assert.False(idle.Advance(4.99f, false));
             Assert.True(idle.Advance(.02f, false));
             idle.Begin();
             Assert.False(idle.Advance(1, false));
             Assert.False(idle.Advance(1, true));
             Assert.True(idle.Advance(.1f, false));
             idle.Begin();
-            Assert.False(idle.Advance(1.5f, false));
+            Assert.False(idle.Advance(4.5f, false));
             for(int i=0;i<150;i++) Assert.False(idle.Advance(.02f,true));
             Assert.False(idle.Active);
             Assert.False(idle.Advance(10,false));
+        }
+        [Fact]
+        public void De6AllowsOpeningAtFiveSecondsButRejectsLateOpening()
+        {
+            var idle = new ColdIdleStabilization(); idle.Begin();
+            Assert.False(idle.Advance(4.98f,false));
+            Assert.False(idle.Advance(.02f,true));
+            for(int i=0;i<150;i++)Assert.False(idle.Advance(.02f,true));
+            Assert.False(idle.Active);
+            idle.Begin();
+            Assert.False(idle.Advance(4.99f,false));
+            Assert.True(idle.Advance(.03f,true));
+            Assert.False(idle.Active);
         }
         [Fact]
         public void ColdStartSlowsProgressivelyButWarmRestartStaysNative()

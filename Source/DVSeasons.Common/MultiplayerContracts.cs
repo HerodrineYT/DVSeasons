@@ -5,7 +5,7 @@ namespace DVSeasons.Core
 {
     public sealed class SeasonNetworkState
     {
-        public const int CurrentProtocol = 9;
+        public const int CurrentProtocol = 13;
         public int Protocol { get; set; }
         public uint Sequence { get; set; }
         public double Phase { get; set; }
@@ -27,6 +27,13 @@ namespace DVSeasons.Core
         public bool HasSurfaceSnowCoverage { get; set; }
         public float SurfaceSnowCoverage { get; set; }
         public WeatherNetworkState Weather { get; set; } = new WeatherNetworkState();
+        public bool HasSideSnowSnapshot { get; set; }
+        public VehicleSideSnowNetworkState[] SideSnow { get; set; } = VehicleSideSnowNetworkState.Empty;
+        public bool HasThermalSnapshot { get; set; }
+        public VehicleThermalNetworkState[] VehicleThermal { get; set; } = VehicleThermalNetworkState.Empty;
+        public bool IgnoreVanillaColdStarts { get; set; }
+        public ColdStartHintState[] ColdStarts { get; set; } = ColdStartHintState.Empty;
+        public BlizzardState Blizzard { get; set; } = new BlizzardState();
 
         public static SeasonNetworkState FromState(SeasonState state, float daysPerSeason = 1f,
             float transitionDays = 1f, float rainIntensity = 0f, float windVelocityX = 0f,
@@ -71,7 +78,9 @@ namespace DVSeasons.Core
                 IsFiniteInRange(WindVelocityX, -20f, 20f) &&
                 IsFiniteInRange(WindVelocityZ, -20f, 20f) &&
                 IsFiniteInRange(SnowLightFactor, 0f, 1f) &&
-                IsFiniteInRange(SurfaceSnowCoverage, 0f, 1f) && Weather != null && Weather.IsValid();
+                IsFiniteInRange(SurfaceSnowCoverage, 0f, 1f) && Weather != null && Weather.IsValid() &&
+                VehicleSideSnowNetworkState.IsValid(SideSnow) && VehicleThermalNetworkState.IsValid(VehicleThermal) &&
+                ColdStartHintState.IsValid(ColdStarts) && Blizzard != null && Blizzard.IsValid();
         }
 
         public void WriteTo(BinaryWriter writer)
@@ -98,6 +107,13 @@ namespace DVSeasons.Core
             writer.Write(HasSurfaceSnowCoverage);
             writer.Write(SurfaceSnowCoverage);
             Weather.WriteTo(writer);
+            Blizzard.WriteTo(writer);
+            writer.Write(IgnoreVanillaColdStarts);
+            ColdStartHintState.WriteTo(writer,ColdStarts);
+            writer.Write(HasSideSnowSnapshot);
+            if (HasSideSnowSnapshot) VehicleSideSnowNetworkState.WriteTo(writer, SideSnow);
+            writer.Write(HasThermalSnapshot);
+            if (HasThermalSnapshot) VehicleThermalNetworkState.WriteTo(writer, VehicleThermal);
         }
 
         public static SeasonNetworkState ReadFrom(BinaryReader reader)
@@ -107,7 +123,7 @@ namespace DVSeasons.Core
             // Mixed versions must be rejected without reading past the end of
             // an older packet and flooding MP's deserializer with exceptions.
             if (protocol != CurrentProtocol) return new SeasonNetworkState { Protocol = protocol };
-            return new SeasonNetworkState
+            var result = new SeasonNetworkState
             {
                 Protocol = protocol,
                 Sequence = reader.ReadUInt32(),
@@ -129,8 +145,16 @@ namespace DVSeasons.Core
                 SeasonSelectionRevision = reader.ReadUInt32(),
                 HasSurfaceSnowCoverage = reader.ReadBoolean(),
                 SurfaceSnowCoverage = reader.ReadSingle(),
-                Weather = WeatherNetworkState.ReadFrom(reader)
+                Weather = WeatherNetworkState.ReadFrom(reader),
+                Blizzard = BlizzardState.ReadFrom(reader),
+                IgnoreVanillaColdStarts=reader.ReadBoolean(),
+                ColdStarts=ColdStartHintState.ReadFrom(reader),
+                HasSideSnowSnapshot = reader.ReadBoolean()
             };
+            if (result.HasSideSnowSnapshot) result.SideSnow = VehicleSideSnowNetworkState.ReadFrom(reader);
+            result.HasThermalSnapshot = reader.ReadBoolean();
+            if (result.HasThermalSnapshot) result.VehicleThermal = VehicleThermalNetworkState.ReadFrom(reader);
+            return result;
         }
 
         private static float Clamp(float value, float min, float max)

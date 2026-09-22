@@ -28,6 +28,8 @@ namespace DVSeasons.Mod
                 entry.OnUpdate = OnUpdate;
                 entry.OnSessionStart = OnSessionStart;
                 entry.Logger.Log("Dynamic Seasons " + entry.Info.Version + " loaded with Language Helper localization.");
+                entry.Logger.Log("Cold-start hints build 2026-09-21: host vanilla-start rule, local tutorial hints, protocol " + SeasonNetworkState.CurrentProtocol + ".");
+                entry.Logger.Log("Native snow sharing build 2026-09-21: shared compatible materials and fallback-only batching index.");
                 return true;
             }
             catch (Exception exception)
@@ -99,6 +101,19 @@ namespace DVSeasons.Mod
             }
             GUILayout.Label(NetworkStatus());
             GUILayout.Label(WeatherStatus());
+            GUILayout.Label(runtime == null ? "" : runtime.BlizzardStatus);
+            var beforeBlizzardControls = GUI.enabled;
+            GUI.enabled = beforeBlizzardControls && runtime != null && runtime.IsWeatherReady &&
+                (!runtime.IsNetworkSessionActive || runtime.IsNetworkAuthority);
+            settings.BlizzardsEnabled = GUILayout.Toggle(settings.BlizzardsEnabled, ModLocalization.Text("Blizzard.Enabled"));
+            GUILayout.BeginHorizontal();
+            GUI.enabled &= state != null && state.Current == SeasonKind.Winter;
+            if (GUILayout.Button(ModLocalization.Text("Blizzard.Schedule"))) runtime.ScheduleBlizzard();
+            if (GUILayout.Button(ModLocalization.Text("Blizzard.Stop"))) runtime.EndBlizzard();
+            GUILayout.EndHorizontal();
+            GUI.enabled = beforeBlizzardControls;
+            GUILayout.Label(ModLocalization.Format("Settings.BlizzardRadioVolume", settings.BlizzardRadioVolume * 100f));
+            settings.BlizzardRadioVolume = GUILayout.HorizontalSlider(settings.BlizzardRadioVolume, 0f, 3f);
             GUILayout.Space(8f);
 
             settings.MuteRainAudioDuringSnow = GUILayout.Toggle(settings.MuteRainAudioDuringSnow,
@@ -112,6 +127,31 @@ namespace DVSeasons.Mod
             settings.ProceduralSnowEnabled = GUILayout.Toggle(settings.ProceduralSnowEnabled,
                 ModLocalization.Text("Settings.NewSnow"));
             GUILayout.Label(ModLocalization.Text("Settings.NewSnowHelp"));
+            settings.VehicleSnowEnabled = !GUILayout.Toggle(!settings.VehicleSnowEnabled,
+                ModLocalization.Text("Settings.DisableVehicleSnow"));
+            GUILayout.Label(ModLocalization.Text("Settings.DisableVehicleSnowHelp"),new GUIStyle(GUI.skin.label){wordWrap=true});
+            var snowLimitGuiEnabled = GUI.enabled;
+            GUI.enabled = snowLimitGuiEnabled && settings.ProceduralSnowEnabled && settings.VehicleSnowEnabled;
+            GUILayout.Label(ModLocalization.Format("Settings.SnowObjectLimit", settings.SnowObjectLimit == 0
+                ? ModLocalization.Text("Settings.Unlimited") : settings.SnowObjectLimit.ToString()));
+            var snowObjectSlider = Mathf.RoundToInt(GUILayout.HorizontalSlider(
+                settings.SnowObjectLimit == 0 ? 1001 : Mathf.Sqrt(settings.SnowObjectLimit) * 10f, 10, 1001));
+            settings.SnowObjectLimit = snowObjectSlider == 1001 ? 0 : Mathf.RoundToInt(snowObjectSlider * snowObjectSlider / 100f);
+            GUI.enabled = snowLimitGuiEnabled;
+            GUILayout.Label(ModLocalization.Text("Settings.SnowObjectLimitHelp"));
+            if(SnowRenderBenchmark.Active)
+            {
+                GUILayout.Label(ModLocalization.Format("Diagnostics.SnowProgress",SnowRenderBenchmark.SecondsRemaining));
+                if(GUILayout.Button(ModLocalization.Text("Diagnostics.SnowCancel")))SnowRenderBenchmark.Cancel();
+            }
+            else
+            {
+                var diagnosticEnabled=GUI.enabled;
+                GUI.enabled=diagnosticEnabled && settings.VehicleSnowEnabled && SnowRenderBenchmark.CanStart;
+                if(GUILayout.Button(ModLocalization.Text("Diagnostics.SnowStart")))SnowRenderBenchmark.Start();
+                GUI.enabled=diagnosticEnabled;
+            }
+            GUILayout.Label(ModLocalization.Text("Diagnostics.SnowHelp"),new GUIStyle(GUI.skin.label){wordWrap=true});
             settings.WinterWindowsEnabled = GUILayout.Toggle(settings.WinterWindowsEnabled,
                 ModLocalization.Text("Settings.WinterWindows"));
             GUILayout.BeginHorizontal();
@@ -125,6 +165,14 @@ namespace DVSeasons.Mod
             settings.EngineHeatingWithoutSwitch = GUILayout.Toggle(settings.EngineHeatingWithoutSwitch,
                 ModLocalization.Text("Settings.EngineHeatingWithoutSwitch"));
             GUILayout.Label(ModLocalization.Text("Settings.EngineHeatingWithoutSwitchHelp"));
+            var startingGuiEnabled=GUI.enabled;
+            GUI.enabled=startingGuiEnabled && runtime.CanConfigureColdStarts;
+            var ignoreCold=GUILayout.Toggle(runtime.IgnoreVanillaColdStarts,ModLocalization.Text("Settings.IgnoreVanillaColdStarts"));
+            if(runtime.CanConfigureColdStarts)settings.IgnoreVanillaColdStarts=ignoreCold;
+            GUI.enabled=startingGuiEnabled;
+            GUILayout.Label(ModLocalization.Text("Settings.IgnoreVanillaColdStartsHelp"));
+            settings.ColdStartHintsEnabled=GUILayout.Toggle(settings.ColdStartHintsEnabled,
+                ModLocalization.Text("Settings.ColdStartHints"));
             settings.AutumnLeavesEnabled = GUILayout.Toggle(settings.AutumnLeavesEnabled,
                 ModLocalization.Text("Settings.AutumnLeaves"));
             GUILayout.Label(ModLocalization.Format("Settings.LeafLimit", settings.AutumnLeafLimit == 0

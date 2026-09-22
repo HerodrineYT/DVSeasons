@@ -18,6 +18,15 @@ namespace DVSeasons.Mod
             public readonly List<RailSnowContactIndex.Mark> Marks = new List<RailSnowContactIndex.Mark>();
             public bool Dirty;
             public bool TopologyDirty;
+            // CPU bounds stay current while the GPU mesh is deferred offscreen.
+            // Extensions only grow this conservative envelope until chunk reuse.
+            public Bounds Bounds;
+            public bool HasBounds;
+            public void Include(Vector3 point)
+            {
+                if (HasBounds) Bounds.Encapsulate(point);
+                else { Bounds = new Bounds(point, Vector3.zero); HasBounds = true; }
+            }
             public Chunk() { Mesh.MarkDynamic(); }
             public int Generation;
             public float LastStamp;
@@ -37,6 +46,7 @@ namespace DVSeasons.Mod
         public float SnowClock { get; private set; }
         public Vector3 WorldOffset;
         public int SegmentCount { get; private set; }
+        internal int MeshUploadCount { get; private set; }
         public void Advance(float snowfall, float seconds)
         { SnowClock += Mathf.Clamp01(snowfall)*Mathf.Max(0,seconds)/180f; }
 
@@ -104,6 +114,7 @@ namespace DVSeasons.Mod
                 {
                     var chunk=old.Chunks[i];int n=old.Ends[i];
                     chunk.Vertices[n]=end-width; chunk.Vertices[n+1]=end+width;chunk.Dirty=true;
+                    chunk.Include(end-width);chunk.Include(end+width);
                     var mark=chunk.Marks[n/4];mark.B=end;contacts.Update(mark);
                 }
                 else Add(start+offset,end,width,old,i);
@@ -121,6 +132,7 @@ namespace DVSeasons.Mod
                     chunk=chunks[0]; chunks.RemoveAt(0); // reuse oldest allocation
                     foreach(var mark in chunk.Marks)contacts.Remove(mark);chunk.Marks.Clear();
                     chunk.Vertices.Clear(); chunk.Uv.Clear(); chunk.Indices.Clear(); chunk.Mesh.Clear(); chunk.Generation++;
+                    chunk.HasBounds=false;
                 }
                 else chunk=new Chunk();
                 chunks.Add(chunk);
@@ -131,47 +143,49 @@ namespace DVSeasons.Mod
             wheel.Chunks[side]=chunk;wheel.Ends[side]=n+2;wheel.Generations[side]=chunk.Generation;
             chunk.Vertices.Add(a-width); chunk.Vertices.Add(a+width);
             chunk.Vertices.Add(b-width); chunk.Vertices.Add(b+width);
+            chunk.Include(a-width);chunk.Include(a+width);chunk.Include(b-width);chunk.Include(b+width);
             chunk.Uv.Add(new Vector2(-1,SnowClock)); chunk.Uv.Add(new Vector2(1,SnowClock));
             chunk.Uv.Add(new Vector2(-1,SnowClock)); chunk.Uv.Add(new Vector2(1,SnowClock));
             chunk.Indices.Add(n);chunk.Indices.Add(n+2);chunk.Indices.Add(n+1);
             chunk.Indices.Add(n+1);chunk.Indices.Add(n+2);chunk.Indices.Add(n+3);
             chunk.Dirty=chunk.TopologyDirty=true; chunk.LastStamp=SnowClock; SegmentCount++;
         }
-        public bool HasVisibleTracks(Plane[] frustum)
+        public bool HasVisibleTracks(Plane[] frustum, Plane[] secondaryFrustum = null)
         {
             foreach(var chunk in chunks)
             {
                 if(SnowClock-chunk.LastStamp>=1f) continue;
-                if(chunk.Dirty) return true;
-                var bounds=chunk.Mesh.bounds;bounds.center+=WorldOffset;
-                if(GeometryUtility.TestPlanesAABB(frustum,bounds)) return true;
+                var bounds=chunk.Bounds;bounds.center+=WorldOffset;
+                if(SnowCameraFrustum.Intersects(frustum,secondaryFrustum,bounds)) return true;
             }
             return false;
         }
-        public void Record(CommandBuffer buffer, Material material, Plane[] frustum)
+        public void Record(CommandBuffer buffer, Material material, Plane[] frustum, Plane[] secondaryFrustum = null)
         {
             buffer.SetGlobalFloat("_DVPSRailSnowClock",SnowClock);
             var matrix=Matrix4x4.Translate(WorldOffset);
             foreach(var chunk in chunks)
             {
                 if(SnowClock-chunk.LastStamp>=1f) continue;
+                var bounds=chunk.Bounds; bounds.center+=WorldOffset;
+                if(!SnowCameraFrustum.Intersects(frustum,secondaryFrustum,bounds)) continue;
                 if(chunk.Dirty)
                 {
                     chunk.Mesh.SetVertices(chunk.Vertices);
                     if(chunk.TopologyDirty)
-                    {chunk.Mesh.SetUVs(0,chunk.Uv);chunk.Mesh.SetTriangles(chunk.Indices,0);chunk.TopologyDirty=false;}
-                    else chunk.Mesh.RecalculateBounds();
+                    {chunk.Mesh.SetUVs(0,chunk.Uv);chunk.Mesh.SetTriangles(chunk.Indices,0,false);chunk.TopologyDirty=false;}
+                    chunk.Mesh.bounds=chunk.Bounds;
                     chunk.Dirty=false;
+                    MeshUploadCount++;
                 }
-                var bounds=chunk.Mesh.bounds; bounds.center+=WorldOffset;
-                if(GeometryUtility.TestPlanesAABB(frustum,bounds)) buffer.DrawMesh(chunk.Mesh,matrix,material,0,2);
+                buffer.DrawMesh(chunk.Mesh,matrix,material,0,2);
             }
         }
         public void Dispose()
         {
             foreach(var c in chunks)
                 if(Application.isPlaying) UnityEngine.Object.Destroy(c.Mesh); else UnityEngine.Object.DestroyImmediate(c.Mesh);
-            chunks.Clear(); previous.Clear(); contacts.Clear(); SnowClock=0; SegmentCount=0;
+            chunks.Clear(); previous.Clear(); contacts.Clear(); SnowClock=0; SegmentCount=0; MeshUploadCount=0;
         }
     }
 }

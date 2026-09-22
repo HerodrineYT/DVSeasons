@@ -22,6 +22,9 @@ namespace DVSeasons.Multiplayer
         private float nextBroadcastTime;
         private float nextRequestTime;
         private SeasonNetworkState lastState;
+        private VehicleSideSnowNetworkState[] lastSideSnow = VehicleSideSnowNetworkState.Empty;
+        private VehicleThermalNetworkState[] lastThermal = VehicleThermalNetworkState.Empty;
+        private bool hasThermal;
         private bool receivedStateLogged;
         private bool precipitationStateLogged;
         private bool lastPrecipitationActive;
@@ -121,6 +124,10 @@ namespace DVSeasons.Multiplayer
             if (!value)
             {
                 lastReceivedSequence = 0;
+                lastState = null;
+                lastSideSnow = VehicleSideSnowNetworkState.Empty;
+                lastThermal = VehicleThermalNetworkState.Empty; hasThermal = false;
+                nextBroadcastTime = 0f;
                 nextRequestTime = 0f;
                 receivedStateLogged = false;
                 precipitationStateLogged = false;
@@ -131,8 +138,12 @@ namespace DVSeasons.Multiplayer
         public void Publish(SeasonNetworkState state, bool force)
         {
             if (!enabled || disposed || state == null || !IsSessionActive || !IsAuthority || MultiplayerAPI.Server == null) return;
-            lastState = Copy(state);
             if (!force && Time.realtimeSinceStartup < nextBroadcastTime) return;
+            // Runtime snapshots include a bounded fleet array. Keep copying and
+            // serialization at the broadcast cadence, never at render cadence.
+            lastState = Copy(state);
+            if (lastState.HasSideSnowSnapshot) lastSideSnow = lastState.SideSnow;
+            if (lastState.HasThermalSnapshot) { lastThermal = lastState.VehicleThermal; hasThermal = true; }
             // Weather-editor changes need to reach clients quickly enough that the
             // first visible flakes do not lag several seconds behind the host.
             nextBroadcastTime = Time.realtimeSinceStartup + 1f;
@@ -168,7 +179,10 @@ namespace DVSeasons.Multiplayer
         private void OnServerStopped()
         {
             DetachServer();
-            sequence = 0; nextBroadcastTime = 0; lastState = null; heaterPeers.Clear(); heaters.Clear();
+            sequence = 0; nextBroadcastTime = 0; lastState = null;
+            lastSideSnow = VehicleSideSnowNetworkState.Empty;
+            lastThermal = VehicleThermalNetworkState.Empty; hasThermal = false;
+            heaterPeers.Clear(); heaters.Clear();
         }
         private void OnClientStopped() { clientRegistered = false; lastReceivedSequence = 0; nextRequestTime = 0; }
 
@@ -277,6 +291,7 @@ namespace DVSeasons.Multiplayer
         {
             if (lastState == null || MultiplayerAPI.Server == null) return;
             lastState.Sequence = ++sequence;
+            lastState.Blizzard.HostUtcTicks = DateTime.UtcNow.Ticks;
             MultiplayerAPI.Server.SendSerializablePacketToAll(new SeasonStatePacket { State = Copy(lastState) }, true, true, null);
         }
 
@@ -284,6 +299,11 @@ namespace DVSeasons.Multiplayer
         {
             if (lastState == null || player == null || player.IsHost || MultiplayerAPI.Server == null) return;
             var copy = Copy(lastState);
+            copy.Blizzard.HostUtcTicks = DateTime.UtcNow.Ticks;
+            copy.HasSideSnowSnapshot = true;
+            copy.SideSnow = lastSideSnow;
+            copy.HasThermalSnapshot = hasThermal;
+            copy.VehicleThermal = lastThermal;
             copy.Sequence = ++sequence;
             MultiplayerAPI.Server.SendSerializablePacketToPlayer(new SeasonStatePacket { State = copy }, player, true);
         }
@@ -312,7 +332,16 @@ namespace DVSeasons.Multiplayer
                 SeasonSelectionRevision = source.SeasonSelectionRevision,
                 HasSurfaceSnowCoverage = source.HasSurfaceSnowCoverage,
                 SurfaceSnowCoverage = source.SurfaceSnowCoverage,
-                Weather = source.Weather == null ? null : source.Weather.Clone()
+                Weather = source.Weather == null ? null : source.Weather.Clone(),
+                Blizzard = source.Blizzard?.Clone(),
+                HasSideSnowSnapshot = source.HasSideSnowSnapshot,
+                HasThermalSnapshot = source.HasThermalSnapshot,
+                IgnoreVanillaColdStarts=source.IgnoreVanillaColdStarts,
+                ColdStarts=source.ColdStarts==null?null:source.ColdStarts.Length==0?ColdStartHintState.Empty:(ColdStartHintState[])source.ColdStarts.Clone(),
+                VehicleThermal = source.VehicleThermal == null ? null : source.VehicleThermal.Length == 0
+                    ? VehicleThermalNetworkState.Empty : (VehicleThermalNetworkState[])source.VehicleThermal.Clone(),
+                SideSnow = source.SideSnow == null ? null : source.SideSnow.Length == 0
+                    ? VehicleSideSnowNetworkState.Empty : (VehicleSideSnowNetworkState[])source.SideSnow.Clone()
             };
         }
     }

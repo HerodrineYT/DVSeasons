@@ -1,8 +1,11 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Reflection;
 using DVSeasons.Core;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.SceneManagement;
 
 namespace DVSeasons.Mod
 {
@@ -16,6 +19,7 @@ namespace DVSeasons.Mod
             public Texture Original;
             public Texture Applied;
             public bool IsDistantTerrain;
+            public bool WaitingForArray;
         }
 
         private sealed class LayeredArrayState
@@ -25,6 +29,9 @@ namespace DVSeasons.Mod
             public int CoverageStep = -1;
             public int AppliedLayerCount;
             public bool Failed;
+            public Texture2DArray PendingWinter;
+            public int PendingCoverageStep = -1, PendingLayerCount, NextLayer;
+            public bool Queued;
         }
 
         private sealed class TerrainLayerBinding
@@ -66,6 +73,8 @@ namespace DVSeasons.Mod
             new Dictionary<int, LayeredArrayState>();
         private readonly Dictionary<int, TerrainLayerBinding> terrainLayerBindings =
             new Dictionary<int, TerrainLayerBinding>();
+        private readonly Queue<LayeredArrayState> pendingArrays = new Queue<LayeredArrayState>();
+        private int arrayWorkFrame = -1;
         private float nextScanTime;
         private float nextReapplyTime;
         private int lastSeasonKey = int.MinValue;
@@ -75,6 +84,57 @@ namespace DVSeasons.Mod
         private bool missingWinterArrayLogged;
         private readonly SpringTerrainTint springTint;
         private int springStep;
+        private sealed class SceneScan
+        {
+            public Scene Scene;
+            public IEnumerator<int> Work;
+        }
+        private struct SceneNode { public Transform Transform; public bool Distant; }
+        private sealed class SceneScanBuffers
+        {
+            public readonly List<GameObject> Roots = new List<GameObject>();
+            public readonly Queue<SceneNode> Pending = new Queue<SceneNode>();
+            public readonly HashSet<int> SeenMaterials = new HashSet<int>();
+            public void Clear()
+            {
+                Roots.Clear();Pending.Clear();SeenMaterials.Clear();
+            }
+        }
+        // A priority scene can suspend another iterator. Each live walk owns its
+        // buffers exclusively; completed walks reuse storage without world refs.
+        private readonly Stack<SceneScanBuffers> sceneScanBuffers = new Stack<SceneScanBuffers>();
+        private readonly LinkedList<SceneScan> pendingScenes = new LinkedList<SceneScan>();
+        private readonly HashSet<int> queuedScenes = new HashSet<int>();
+        private readonly List<Material> rendererMaterials = new List<Material>();
+        private bool sceneEventsSubscribed;
+        private bool includeDistantMaterials;
+        // The native landscape must not wait behind unrelated scene transforms.
+        // DV caches distant materials and visibility-swapped MicroSplat instances;
+        // use those small lists before the bounded general scene fallback.
+        private static readonly Type DistantTerrainType = Type.GetType("DV.WorldTools.DistantTerrain, DV.DistantTerrain", false);
+        private static readonly Type MicroSplatTerrainType = Type.GetType("JBooth.MicroSplat.MicroSplatTerrain, JBooth.MicroSplat.Core", false);
+        private static readonly FieldInfo DistantMaterials = DistantTerrainType == null ? null :
+            DistantTerrainType.GetField("materials", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo MicroSplatInstances = MicroSplatTerrainType == null ? null :
+            MicroSplatTerrainType.GetField("sInstances", BindingFlags.Static | BindingFlags.NonPublic);
+        private static readonly FieldInfo MicroSplatTemplate = MicroSplatTerrainType == null ? null :
+            MicroSplatTerrainType.GetField("templateMaterial", BindingFlags.Instance | BindingFlags.Public);
+        private static readonly FieldInfo MicroSplatInstanceMaterial = MicroSplatTerrainType == null ? null :
+            MicroSplatTerrainType.GetField("matInstance", BindingFlags.Instance | BindingFlags.Public);
+        private readonly List<Component> distantTerrainSources = new List<Component>();
+        private readonly List<MeshRenderer> distantRenderers = new List<MeshRenderer>();
+        private readonly HashSet<int> distantSourceIds = new HashSet<int>();
+        private readonly HashSet<int> distantRendererIds = new HashSet<int>();
+        private readonly HashSet<int> nativeMaterialsVisited = new HashSet<int>();
+        private bool nativeSourcesDirty = true;
+        private float nextNativeScanTime;
+        internal int NativeSourceSnapshotCount { get; private set; }
+        internal int NativeSceneScanCount { get; private set; }
+        internal int LastDiscoverySteps { get; private set; }
+        internal int LastMaterialVisits { get; private set; }
+        internal int LayerBlitCount { get; private set; }
+        internal int LayerMipGenerationCount { get; private set; }
+        internal int LastLayerBuildCopies { get; private set; }
 
         public MicroSplatSeasonalTerrainController(SeasonAssetBundleRepository texturePack)
         {
@@ -93,14 +153,28 @@ namespace DVSeasons.Mod
             }
 
             restored=false;
+            includeDistantMaterials=settings.DistantTerrainSeasonal;
+            if(!sceneEventsSubscribed)
+            {
+                SceneManager.sceneLoaded+=SceneLoaded;
+                SceneManager.sceneUnloaded+=SceneUnloaded;
+                DV.TerrainSystem.TerrainGrid.Initialized+=NativeTerrainInitialized;
+                sceneEventsSubscribed=true;
+                nextScanTime=0f;
+            }
+            if (nativeSourcesDirty || Time.realtimeSinceStartup >= nextNativeScanTime)
+            {
+                nextNativeScanTime = Time.realtimeSinceStartup + .5f;
+                using(SnowPerformance.Measure("terrain-native-discovery"))
+                    if(ScanNativeLandscapeMaterials()>0) nextReapplyTime=0f;
+            }
             if (Time.realtimeSinceStartup >= nextScanTime)
             {
-                // Resources.FindObjectsOfTypeAll<Material>() is expensive in DV's
-                // large streamed world. Ten seconds is still quick enough to catch
-                // newly loaded distant terrain without causing a regular FPS hitch.
                 nextScanTime = Time.realtimeSinceStartup + 10f;
-                Scan(settings.DistantTerrainSeasonal);
+                ScanTerrains();
+                for(int i=0;i<SceneManager.sceneCount;i++) QueueScene(SceneManager.GetSceneAt(i),false);
             }
+            using(SnowPerformance.Measure("terrain-material-discovery")) AdvanceDiscovery();
 
             // Native landscape arrays cover every terrain LOD, including native
             // distant terrain beyond the screen-space snow exposure maps.
@@ -123,17 +197,20 @@ namespace DVSeasons.Mod
                 nextReapplyTime = Time.realtimeSinceStartup + 1f;
                 ReapplyToNewBindings(coverageStep, settings.DistantTerrainSeasonal);
             }
+            using(SnowPerformance.Measure("terrain-array-build"))
+                AdvanceLayeredArrays(coverageStep);
         }
 
         public void Dispose()
         {
             Restore();
+            StopDiscovery();
             bindings.Clear();
             terrainLayerBindings.Clear();
             canonicalSummerArrays.Clear();
             foreach (var state in layeredArrays.Values)
                 if (state.Output != null) UnityEngine.Object.Destroy(state.Output);
-            layeredArrays.Clear();
+            layeredArrays.Clear();pendingArrays.Clear();
             springTint.Dispose();
             nextScanTime = 0f;
             nextReapplyTime = 0f;
@@ -141,8 +218,234 @@ namespace DVSeasons.Mod
             missingWinterArrayLogged = false;
         }
 
+        private void SceneLoaded(Scene scene,LoadSceneMode mode)
+        {
+            // An unrelated streamed scene must not discard every cached distant
+            // ring and repeat a global Resources snapshot. Inspect only this
+            // scene, before the general bounded material-discovery backlog.
+            QueueScene(scene,true);
+        }
+
+        private void SceneUnloaded(Scene scene)
+        {
+            for(var node=pendingScenes.First;node!=null;)
+            {
+                var next=node.Next;
+                if(node.Value.Scene.handle==scene.handle)
+                {node.Value.Work.Dispose();pendingScenes.Remove(node);queuedScenes.Remove(scene.handle);}
+                node=next;
+            }
+            // Unity null checks remove destroyed sources on the next cheap poll.
+            nextNativeScanTime=0f;
+        }
+
+        private void NativeTerrainInitialized() { nativeSourcesDirty=true; }
+
+        private int ScanNativeLandscapeMaterials()
+        {
+            if(nativeSourcesDirty)
+            {
+                nativeSourcesDirty=false;
+                // No global Resources snapshot or recursive subtree query on
+                // startup/grid changes. Discover loaded, inactive and late roots
+                // through the same bounded breadth-first scene walk.
+                for(int i=0;i<SceneManager.sceneCount;i++)
+                {
+                    var scene=SceneManager.GetSceneAt(i);
+                    for(var node=pendingScenes.First;node!=null;node=node.Next)
+                    {
+                        if(node.Value.Scene.handle!=scene.handle) continue;
+                        node.Value.Work.Dispose();pendingScenes.Remove(node);queuedScenes.Remove(scene.handle);break;
+                    }
+                    QueueScene(scene,true);
+                }
+            }
+            distantTerrainSources.RemoveAll(source=>source==null);
+            distantRenderers.RemoveAll(renderer=>renderer==null);
+            int added=0;
+            nativeMaterialsVisited.Clear();
+            if(includeDistantMaterials)
+            {
+                // Start() may populate the cache after our first probe. Re-read
+                // these few materials; also catch renderer material replacements.
+                foreach(var source in distantTerrainSources)
+                {
+                    if(source==null || DistantMaterials==null) continue;
+                    var materials=DistantMaterials.GetValue(source) as IList;
+                    if(materials!=null) foreach(var value in materials)
+                        added+=ScanNativeMaterial(value as Material);
+                }
+                foreach(var renderer in distantRenderers)
+                {
+                    if(renderer==null) continue;
+                    renderer.GetSharedMaterials(rendererMaterials);
+                    foreach(var material in rendererMaterials) added+=ScanNativeMaterial(material);
+                }
+            }
+            var instances=MicroSplatInstances==null ? null : MicroSplatInstances.GetValue(null) as IList;
+            if(instances!=null) foreach(var instance in instances)
+            {
+                var component=instance as Component;
+                if(component==null) continue;
+                // MicroSplatVisibilityHack replaces Terrain.materialTemplate with
+                // a shadow material out of view. Prepare its real matInstance so
+                // turning the camera never reveals an unconverted terrain tile.
+                if(MicroSplatTemplate!=null) added+=ScanNativeMaterial(MicroSplatTemplate.GetValue(instance) as Material);
+                if(MicroSplatInstanceMaterial!=null) added+=ScanNativeMaterial(MicroSplatInstanceMaterial.GetValue(instance) as Material);
+            }
+            return added;
+        }
+
+        private void AddNativeDistantSource(Component source)
+        {
+            if(source==null || !distantSourceIds.Add(source.GetInstanceID())) return;
+            distantTerrainSources.Add(source);
+            nextNativeScanTime=0f;
+        }
+
+        private int ScanNativeMaterial(Material material)
+        {
+            return material!=null && nativeMaterialsVisited.Add(material.GetInstanceID())
+                ? ScanRendererMaterial(material,includeDistantMaterials) : 0;
+        }
+
+        private void QueueScene(Scene scene,bool priority)
+        {
+            if(!scene.IsValid() || !scene.isLoaded) return;
+            if(!queuedScenes.Add(scene.handle))
+            {
+                if(priority) for(var node=pendingScenes.First;node!=null;node=node.Next)
+                    if(node.Value.Scene.handle==scene.handle)
+                    {pendingScenes.Remove(node);pendingScenes.AddFirst(node);break;}
+                return;
+            }
+            var scan=new SceneScan {Scene=scene,Work=ScanScene(scene).GetEnumerator()};
+            if(priority) pendingScenes.AddFirst(scan); else pendingScenes.AddLast(scan);
+        }
+
+        private void AdvanceDiscovery()
+        {
+            LastDiscoverySteps=0; LastMaterialVisits=0;
+            long start=System.Diagnostics.Stopwatch.GetTimestamp();
+            for(int i=0;i<256 && pendingScenes.Count>0;i++)
+            {
+                var work=pendingScenes.First.Value;
+                LastDiscoverySteps++;
+                if(!work.Scene.IsValid() || !work.Scene.isLoaded || !work.Work.MoveNext())
+                {
+                    work.Work.Dispose();pendingScenes.RemoveFirst();queuedScenes.Remove(work.Scene.handle);
+                    if(pendingScenes.Count==0) nextScanTime=Time.realtimeSinceStartup+10f;
+                }
+                if((System.Diagnostics.Stopwatch.GetTimestamp()-start)*1000d/System.Diagnostics.Stopwatch.Frequency>=.25d) break;
+            }
+        }
+
+        private IEnumerable<int> ScanScene(Scene scene)
+        {
+            NativeSceneScanCount++;
+            SceneScanBuffers buffers=null;
+            try
+            {
+                using(SnowPerformance.Measure("terrain-scene-roots"))
+                {
+                    buffers=sceneScanBuffers.Count>0 ? sceneScanBuffers.Pop() : new SceneScanBuffers();
+                    scene.GetRootGameObjects(buffers.Roots);
+                }
+                foreach(var root in buffers.Roots)
+                {
+                    if(root!=null) buffers.Pending.Enqueue(new SceneNode {Transform=root.transform});
+                    yield return 0;
+                }
+                while(buffers.Pending.Count>0)
+                {
+                    var entry=buffers.Pending.Dequeue();var node=entry.Transform;
+                    if(node==null) {yield return 0;continue;}
+                    using(SnowPerformance.Measure("terrain-node-materials"))
+                    {
+                        // A mod can add a native source after its scene loaded.
+                        // Preserve the private-cache and inactive-source discovery.
+                        var native=DistantTerrainType!=null ? node.GetComponent(DistantTerrainType) : null;
+                        if(native!=null) {AddNativeDistantSource(native);entry.Distant=true;}
+                        var renderer=node.GetComponent<Renderer>();
+                        if(renderer!=null)
+                        {
+                            var meshRenderer=renderer as MeshRenderer;
+                            if(entry.Distant && meshRenderer!=null && distantRendererIds.Add(renderer.GetInstanceID()))
+                                distantRenderers.Add(meshRenderer);
+                            renderer.GetSharedMaterials(rendererMaterials);
+                            foreach(var material in rendererMaterials)
+                            {
+                                if(material==null || !buffers.SeenMaterials.Add(material.GetInstanceID())) continue;
+                                LastMaterialVisits++;
+                                if(ScanRendererMaterial(material,includeDistantMaterials)>0) nextReapplyTime=0f;
+                            }
+                        }
+                    }
+                    using(SnowPerformance.Measure("terrain-node-layers"))
+                    {
+                        var terrain=node.GetComponent<Terrain>();
+                        if(terrain!=null) ScanTerrain(terrain);
+                    }
+                    yield return 0;
+                    for(int child=0;node!=null && child<node.childCount;child++)
+                    {
+                        buffers.Pending.Enqueue(new SceneNode {Transform=node.GetChild(child),Distant=entry.Distant});
+                        yield return 0;
+                    }
+                }
+            }
+            finally
+            {
+                if(buffers!=null)
+                {
+                    // Runs on completion, scene unload, grid restart and Dispose.
+                    buffers.Clear();
+                    if(sceneScanBuffers.Count<4) sceneScanBuffers.Push(buffers);
+                }
+            }
+        }
+
+        private void StopDiscovery()
+        {
+            if(sceneEventsSubscribed) SceneManager.sceneLoaded-=SceneLoaded;
+            if(sceneEventsSubscribed) SceneManager.sceneUnloaded-=SceneUnloaded;
+            if(sceneEventsSubscribed) DV.TerrainSystem.TerrainGrid.Initialized-=NativeTerrainInitialized;
+            sceneEventsSubscribed=false;
+            foreach(var scan in pendingScenes) scan.Work.Dispose();
+            sceneScanBuffers.Clear();
+            pendingScenes.Clear();queuedScenes.Clear();rendererMaterials.Clear();
+            distantTerrainSources.Clear();distantRenderers.Clear();distantSourceIds.Clear();distantRendererIds.Clear();
+            nativeMaterialsVisited.Clear();nativeSourcesDirty=true;nextNativeScanTime=0f;
+        }
+
+        private int ScanTerrains()
+        {
+            int added=0;
+            foreach(var terrain in Terrain.activeTerrains) if(terrain!=null) added+=ScanTerrain(terrain);
+            return added;
+        }
+
+        private int ScanTerrain(Terrain terrain)
+        {
+            int added=0;
+            var material=terrain.materialTemplate;
+            if(material!=null) added+=ScanMaterial(material,false);
+            return added+ScanTerrainLayers(terrain);
+        }
+
+        private int ScanRendererMaterial(Material material,bool includeDistantTerrain)
+        {
+            // Preserve the exact vanilla signatures: broad terrain-name matches
+            // previously changed unrelated custom-map impostor materials.
+            if(IsBuiltInMicroSplatMaterial(material)) return ScanMaterial(material,false);
+            return includeDistantTerrain && IsDistantTerrainMaterial(material) ? ScanDistantTerrainMaterial(material) : 0;
+        }
+
         private void Scan(bool includeDistantTerrain)
         {
+            // Restore is exceptional: reconcile even unbound material assets that
+            // cloned our render texture before releasing it. Normal gameplay uses
+            // bounded scene discovery, never a global material snapshot.
             var terrains = Terrain.activeTerrains;
             var added = 0;
             var rendererMaterialAdded = 0;
@@ -375,7 +678,7 @@ namespace DVSeasons.Mod
                 else if (!TryGetCoverageTexture(binding, coverageStep, out target))
                     target = binding.Original;
                 target=target ?? binding.Original;
-                if(!binding.IsDistantTerrain || distantTerrainEnabled)
+                if(!binding.WaitingForArray && (!binding.IsDistantTerrain || distantTerrainEnabled))
                     target=springTint.Get(binding.Original,target,springStep,coverageStep);
                 Apply(binding, target);
             }
@@ -397,7 +700,7 @@ namespace DVSeasons.Mod
                 else if (!TryGetCoverageTexture(binding, coverageStep, out target))
                     target = binding.Original;
                 target=target ?? binding.Original;
-                if(!binding.IsDistantTerrain || distantTerrainEnabled)
+                if(!binding.WaitingForArray && (!binding.IsDistantTerrain || distantTerrainEnabled))
                     target=springTint.Get(binding.Original,target,springStep,coverageStep);
                 var current = binding.Material.GetTexture(binding.Property);
                 // Reassert our intended state when a streamed terrain material was
@@ -491,6 +794,7 @@ namespace DVSeasons.Mod
         private bool TryGetCoverageTexture(Binding binding, int coverageStep, out Texture texture)
         {
             texture = null;
+            binding.WaitingForArray=false;
             if (coverageStep <= 0)
                 return true;
 
@@ -531,7 +835,12 @@ namespace DVSeasons.Mod
             if (!UpdateLayeredArray(state, coverageStep, winter))
                 texture = winter;
             else
-                texture = state.Output;
+            {
+                // An array is published only after all slices and mip levels
+                // exist. Keep the previous valid season until that atomic swap.
+                binding.WaitingForArray=state.CoverageStep<0;
+                texture = state.CoverageStep>=0 ? state.Output : binding.Applied ?? binding.Original;
+            }
             return true;
         }
 
@@ -546,41 +855,19 @@ namespace DVSeasons.Mod
             {
                 ValidateLayerSources(state.Clear, winter);
 
-                if (state.Output == null)
-                {
-                    state.Output = new RenderTexture(
-                        winter.width,
-                        winter.height,
-                        0,
-                        RenderTextureFormat.ARGB32,
-                        RenderTextureReadWrite.Default)
-                    {
-                        name = "DVSeasons Layered Winter Terrain " + state.Clear.GetInstanceID(),
-                        dimension = TextureDimension.Tex2DArray,
-                        volumeDepth = winter.depth,
-                        useMipMap = true,
-                        autoGenerateMips = false,
-                        wrapMode = winter.wrapMode,
-                        filterMode = winter.filterMode,
-                        anisoLevel = Mathf.Max(state.Clear.anisoLevel, winter.anisoLevel),
-                        hideFlags = HideFlags.HideAndDontSave
-                    };
-                    if (!state.Output.Create())
-                        throw new InvalidOperationException(
-                            "GPU render array for the terrain transition could not be created");
-                    for (var slice = 0; slice < state.Clear.depth; slice++)
-                        BlitLayer(state.Clear, slice, state.Output);
-                    state.AppliedLayerCount = 0;
-                    Debug.Log("[DVSeasons] Created a layered terrain copy from the real '" +
-                        state.Clear.name + "' array (" + state.Clear.width + "x" +
-                        state.Clear.height + " -> " + winter.width + "x" + winter.height +
-                        ", " + winter.depth + " layers).");
-                }
-
                 var desiredLayerCount = Mathf.Clamp(Mathf.CeilToInt(
                     coverageStep / (float)SnowCoverProfile.GroundTextureSteps * winter.depth),
                     0,
                     winter.depth);
+                bool changed=state.Output==null || desiredLayerCount!=state.AppliedLayerCount;
+
+                if(state.CoverageStep<0 || state.Output==null)
+                {
+                    state.CoverageStep=-1;
+                    QueueLayeredArray(state,coverageStep,desiredLayerCount,winter);
+                    return true;
+                }
+
                 if (desiredLayerCount > state.AppliedLayerCount)
                 {
                     for (var rank = state.AppliedLayerCount; rank < desiredLayerCount; rank++)
@@ -592,7 +879,7 @@ namespace DVSeasons.Mod
                         BlitLayer(state.Clear, WinterLayerOrder[rank], state.Output);
                 }
 
-                state.Output.GenerateMips();
+                if(changed) {state.Output.GenerateMips();LayerMipGenerationCount++;}
                 state.AppliedLayerCount = desiredLayerCount;
                 state.CoverageStep = coverageStep;
                 Debug.Log("[DVSeasons] Layered terrain snow step " + coverageStep + "/" +
@@ -611,6 +898,64 @@ namespace DVSeasons.Mod
             }
         }
 
+        private void QueueLayeredArray(LayeredArrayState state,int coverageStep,int layerCount,Texture2DArray winter)
+        {
+            if(state.PendingWinter!=winter || state.PendingLayerCount!=layerCount) state.NextLayer=0;
+            state.PendingWinter=winter;state.PendingCoverageStep=coverageStep;state.PendingLayerCount=layerCount;
+            if(!state.Queued) {state.Queued=true;pendingArrays.Enqueue(state);}
+        }
+
+        private static void CreateLayeredOutput(LayeredArrayState state,Texture2DArray winter)
+        {
+            state.Output=new RenderTexture(winter.width,winter.height,0,RenderTextureFormat.ARGB32,RenderTextureReadWrite.Default)
+            {
+                name="DVSeasons Layered Winter Terrain "+state.Clear.GetInstanceID(),dimension=TextureDimension.Tex2DArray,
+                volumeDepth=winter.depth,useMipMap=true,autoGenerateMips=false,wrapMode=winter.wrapMode,
+                filterMode=winter.filterMode,anisoLevel=Mathf.Max(state.Clear.anisoLevel,winter.anisoLevel),
+                hideFlags=HideFlags.HideAndDontSave
+            };
+            if(!state.Output.Create()) throw new InvalidOperationException("GPU render array for the terrain transition could not be created");
+        }
+
+        private void AdvanceLayeredArrays(int coverageStep)
+        {
+            LastLayerBuildCopies=0;
+            if(coverageStep<=0 || coverageStep>=SnowCoverProfile.GroundTextureSteps || arrayWorkFrame==Time.frameCount) return;
+            arrayWorkFrame=Time.frameCount;
+            var previous=RenderTexture.active;
+            try
+            {
+                for(int budget=0;budget<2 && pendingArrays.Count>0;)
+                {
+                    var state=pendingArrays.Peek();var winter=state.PendingWinter;
+                    if(state.Failed || winter==null || state.Clear==null)
+                    {pendingArrays.Dequeue();state.Queued=false;continue;}
+                    int desired=SnowCoverProfile.GetWinterTerrainLayerCount(coverageStep,winter.depth);
+                    QueueLayeredArray(state,coverageStep,desired,winter);
+                    try
+                    {
+                        if(state.Output==null) CreateLayeredOutput(state,winter);
+                        int rank=state.NextLayer;
+                        BlitLayer(rank<desired?winter:state.Clear,WinterLayerOrder[rank],state.Output);
+                        budget++;LastLayerBuildCopies++;state.NextLayer++;
+                        if(state.NextLayer<winter.depth) continue;
+                        state.Output.GenerateMips();LayerMipGenerationCount++;
+                        state.AppliedLayerCount=desired;state.CoverageStep=coverageStep;
+                        pendingArrays.Dequeue();state.Queued=false;nextReapplyTime=0f;
+                        Debug.Log("[DVSeasons] Completed staged terrain array '"+state.Clear.name+"': "+desired+"/"+winter.depth+
+                            " winter layers, published after all slices and mip levels were ready.");
+                    }
+                    catch(Exception exception)
+                    {
+                        state.Failed=true;state.Queued=false;pendingArrays.Dequeue();
+                        UnityEngine.Object.Destroy(state.Output);state.Output=null;nextReapplyTime=0f;
+                        Debug.LogWarning("[DVSeasons] Staged terrain array failed: "+exception.Message);
+                    }
+                }
+            }
+            finally {RenderTexture.active=previous;}
+        }
+
         private static bool CanBuildLayeredArray(Texture2DArray clear, Texture2DArray winter)
         {
             return clear != null && winter != null &&
@@ -625,7 +970,7 @@ namespace DVSeasons.Mod
                     "clear and winter terrain arrays have incompatible layer counts");
         }
 
-        private static void BlitLayer(
+        private void BlitLayer(
             Texture2DArray source,
             int slice,
             RenderTexture destination)
@@ -636,11 +981,13 @@ namespace DVSeasons.Mod
             // slice. It keeps each map's material numbering, unlike the old spring
             // fallback that produced the bright green industrial rectangle.
             Graphics.Blit(source, destination, slice, slice);
+            LayerBlitCount++;
         }
 
         private void Restore()
         {
             if(restored) return;
+            StopDiscovery();
             // Find clones created since the last scheduled scan before releasing
             // their shared spring render textures (otherwise they become black).
             Scan(true);

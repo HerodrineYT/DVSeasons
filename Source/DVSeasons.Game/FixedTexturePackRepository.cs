@@ -29,9 +29,24 @@ namespace DVSeasons.Mod
         private readonly List<Texture2D> generatedTerrainLayers = new List<Texture2D>();
         private readonly Dictionary<string, Color32[]> loadedPixelProfiles =
             new Dictionary<string, Color32[]>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, Texture2D> loadedTextures =
+            new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
+        private readonly List<Texture2D> ownedTextures = new List<Texture2D>();
+        private readonly HashSet<string> checkedOverrides = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, bool> validTrackSets =
+            new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         private readonly string winterBallastPath;
         private readonly string externalSeasonalRoot;
+        private readonly string overrideSeasonalRoot;
         private readonly string bundlePath;
+        private readonly string winterBundlePath;
+        private AssetBundle winterBundle;
+        private AssetBundleCreateRequest winterBundleLoadRequest;
+        private bool winterBundleLoadFinished;
+        private readonly string tracksBundlePath;
+        private AssetBundle tracksBundle;
+        private AssetBundleCreateRequest tracksBundleLoadRequest;
+        private bool tracksBundleLoadFinished;
         private Texture2D winterBallastTexture;
         private bool winterBallastLoadAttempted;
         private float nextBundleLoadAttempt;
@@ -43,16 +58,23 @@ namespace DVSeasons.Mod
         {
             winterBallastPath = Path.Combine(modPath ?? string.Empty, "Textures", "winter_ballast_balanced.png");
             externalSeasonalRoot = Path.Combine(modPath ?? string.Empty, "Textures", "Seasonal");
+            overrideSeasonalRoot = Path.Combine(modPath ?? string.Empty, "Overrides", "Seasonal");
             bundlePath = Path.Combine(modPath ?? string.Empty, "AssetBundles", "dvseasons_dv99");
+            winterBundlePath = Path.Combine(modPath ?? string.Empty, "AssetBundles", "dvseasons_winter");
+            tracksBundlePath = Path.Combine(modPath ?? string.Empty, "AssetBundles", "dvseasons_tracks");
             // Do not load a world asset at UMM startup in the main menu. DV unloads
             // AssetBundles between worlds, so every access also checks Unity's
             // destroyed-object state rather than trusting the managed reference.
         }
 
         public AssetBundle Bundle { get; private set; }
+        public int TextureDecodeCount { get; private set; }
+        public int PixelReadbackCount { get; private set; }
 
         public void BeginLoad()
         {
+            EnsureWinterBundleLoaded();
+            EnsureTracksBundleLoaded();
             if (Bundle != null || bundleLoadRequest != null ||
                 Time.realtimeSinceStartup < nextBundleLoadAttempt) return;
             nextBundleLoadAttempt = Time.realtimeSinceStartup + 5f;
@@ -85,7 +107,7 @@ namespace DVSeasons.Mod
             get
             {
                 EnsureBundleLoaded();
-                return Bundle != null || bundleLoadFinished;
+                return (Bundle != null || bundleLoadFinished) && winterBundleLoadFinished && tracksBundleLoadFinished;
             }
         }
 
@@ -106,9 +128,13 @@ namespace DVSeasons.Mod
             return null;
         }
 
-        private bool EnsureBundleLoaded()
+        private bool EnsureBundleLoaded(bool requireWinter = false)
         {
-            if (Bundle != null) return true;
+            var winterReady = EnsureWinterBundleLoaded();
+            // Evaluate both independently so all archive I/O can overlap.
+            var tracksReady = EnsureTracksBundleLoaded();
+            winterReady &= tracksReady;
+            if (Bundle != null) return !requireWinter || winterReady;
             if (bundleLoadRequest == null)
             {
                 BeginLoad();
@@ -127,9 +153,13 @@ namespace DVSeasons.Mod
                 }
                 var assets = Bundle.GetAllAssetNames();
                 for (var i = 0; i < assets.Length; i++) IndexAsset(assets[i]);
+                if (winterBundle != null)
+                    foreach (var asset in winterBundle.GetAllAssetNames()) IndexAsset(asset);
+                if (tracksBundle != null)
+                    foreach (var asset in tracksBundle.GetAllAssetNames()) IndexAsset(asset);
                 bundleLoadFailureLogged = false;
                 Debug.Log("[DVSeasons] Loaded DV99 Unity AssetBundle with " + assets.Length + " assets.");
-                return true;
+                return !requireWinter || winterReady;
             }
             catch (Exception exception)
             {
@@ -142,6 +172,93 @@ namespace DVSeasons.Mod
             }
         }
 
+        private bool EnsureWinterBundleLoaded()
+        {
+            if (winterBundle != null) return true;
+            if (!ReferenceEquals(winterBundle, null))
+            {
+                winterBundle = null;
+                winterBundleLoadFinished = false;
+            }
+            if (winterBundleLoadRequest == null)
+            {
+                if (winterBundleLoadFinished) return true;
+                if (!File.Exists(winterBundlePath))
+                {
+                    winterBundleLoadFinished = true;
+                    return true;
+                }
+                try { winterBundleLoadRequest = AssetBundle.LoadFromFileAsync(winterBundlePath); }
+                catch (Exception exception)
+                {
+                    winterBundleLoadFinished = true;
+                    Debug.LogWarning("[DVSeasons] Winter texture AssetBundle unavailable: " + exception.Message);
+                    return true;
+                }
+                return false;
+            }
+            if (!winterBundleLoadRequest.isDone) return false;
+            winterBundle = winterBundleLoadRequest.assetBundle;
+            winterBundleLoadRequest = null;
+            winterBundleLoadFinished = true;
+            if (winterBundle == null)
+                Debug.LogWarning("[DVSeasons] Winter texture AssetBundle could not be loaded: " + winterBundlePath);
+            else
+            {
+                foreach (var asset in winterBundle.GetAllAssetNames()) IndexAsset(asset);
+                Debug.Log("[DVSeasons] Prepared winter texture AssetBundle loaded asynchronously.");
+            }
+            return true;
+        }
+
+        private bool EnsureTracksBundleLoaded()
+        {
+            if (tracksBundle != null) return true;
+            if (!ReferenceEquals(tracksBundle, null))
+            {
+                tracksBundle = null;
+                tracksBundleLoadFinished = false;
+            }
+            if (tracksBundleLoadRequest == null)
+            {
+                if (tracksBundleLoadFinished) return true;
+                if (!File.Exists(tracksBundlePath))
+                {
+                    tracksBundleLoadFinished = true;
+                    return true;
+                }
+                try { tracksBundleLoadRequest = AssetBundle.LoadFromFileAsync(tracksBundlePath); }
+                catch (Exception exception)
+                {
+                    tracksBundleLoadFinished = true;
+                    Debug.LogWarning("[DVSeasons] Track texture AssetBundle unavailable: " + exception.Message);
+                    return true;
+                }
+                return false;
+            }
+            if (!tracksBundleLoadRequest.isDone) return false;
+            tracksBundle = tracksBundleLoadRequest.assetBundle;
+            tracksBundleLoadRequest = null;
+            tracksBundleLoadFinished = true;
+            if (tracksBundle == null)
+                Debug.LogWarning("[DVSeasons] Track texture AssetBundle could not be loaded: " + tracksBundlePath);
+            else
+            {
+                foreach (var asset in tracksBundle.GetAllAssetNames()) IndexAsset(asset);
+                Debug.Log("[DVSeasons] Prepared track texture AssetBundle loaded asynchronously.");
+            }
+            return true;
+        }
+
+        private Texture2D LoadPackedTexture(string assetName)
+        {
+            if (tracksBundle != null && tracksBundle.Contains(assetName))
+                return tracksBundle.LoadAsset<Texture2D>(assetName);
+            return winterBundle != null && winterBundle.Contains(assetName)
+                ? winterBundle.LoadAsset<Texture2D>(assetName)
+                : Bundle.LoadAsset<Texture2D>(assetName);
+        }
+
         private void LogBundleUnavailable()
         {
             if (!bundleLoadFailureLogged)
@@ -151,6 +268,12 @@ namespace DVSeasons.Mod
 
         public void ResetForSession()
         {
+            loadedTextures.Clear();
+            checkedOverrides.Clear();
+            validTrackSets.Clear();
+            for (var i = 0; i < ownedTextures.Count; i++)
+                if (ownedTextures[i] != null) UnityEngine.Object.Destroy(ownedTextures[i]);
+            ownedTextures.Clear();
             loadedTerrainArrays.Clear();
             loadedTerrainLayers.Clear();
             for (var i = 0; i < generatedTerrainLayers.Count; i++)
@@ -164,6 +287,8 @@ namespace DVSeasons.Mod
             nextBundleLoadAttempt = 0f;
             bundleLoadFailureLogged = false;
             bundleLoadFinished = Bundle != null;
+            winterBundleLoadFinished = winterBundle != null;
+            tracksBundleLoadFinished = tracksBundle != null;
         }
 
         public void Dispose()
@@ -177,6 +302,24 @@ namespace DVSeasons.Mod
             }
             if (Bundle != null) Bundle.Unload(true);
             Bundle = null;
+            if (winterBundleLoadRequest != null && winterBundleLoadRequest.isDone)
+            {
+                var pending = winterBundleLoadRequest.assetBundle;
+                if (pending != null && pending != winterBundle) pending.Unload(true);
+                winterBundleLoadRequest = null;
+            }
+            if (winterBundle != null) winterBundle.Unload(true);
+            winterBundle = null;
+            winterBundleLoadFinished = true;
+            if (tracksBundleLoadRequest != null && tracksBundleLoadRequest.isDone)
+            {
+                var pending = tracksBundleLoadRequest.assetBundle;
+                if (pending != null && pending != tracksBundle) pending.Unload(true);
+                tracksBundleLoadRequest = null;
+            }
+            if (tracksBundle != null) tracksBundle.Unload(true);
+            tracksBundle = null;
+            tracksBundleLoadFinished = true;
             bundleLoadFinished = true;
         }
 
@@ -189,83 +332,113 @@ namespace DVSeasons.Mod
 
         public bool HasCompleteWinterTrackSet(string sourceTextureName)
         {
-            return HasWinterTrack(sourceTextureName, WinterTrackTextureStage.Early) &&
-                HasWinterTrack(sourceTextureName, WinterTrackTextureStage.Middle) &&
-                HasWinterTrack(sourceTextureName, WinterTrackTextureStage.Late);
+            if (!HasWinterTrack(sourceTextureName, WinterTrackTextureStage.Early) ||
+                !HasWinterTrack(sourceTextureName, WinterTrackTextureStage.Middle) ||
+                !HasWinterTrack(sourceTextureName, WinterTrackTextureStage.Late)) return false;
+            var name = CanonicalTextureName(sourceTextureName);
+            bool valid;
+            if (validTrackSets.TryGetValue(name, out valid)) return valid;
+            // The old eager pixel path rejected a broken custom stage even when
+            // the current coverage used only another stage. Keep that fallback,
+            // but do not read bundled pixels for unused stages.
+            for (var stage = WinterTrackTextureStage.Early; stage <= WinterTrackTextureStage.Late; stage++)
+            {
+                var index = (int)stage - 1;
+                var relative = "winter_track/" + GetWinterTrackStageFolder(stage) + "/" + name + ".png";
+                var custom = File.Exists(Path.Combine(overrideSeasonalRoot, relative)) ||
+                    (!winterTrackAssets[index].ContainsKey(name) && File.Exists(Path.Combine(externalSeasonalRoot, relative)));
+                if (stage == WinterTrackTextureStage.Late && IsSleeperTexture(name))
+                {
+                    var winterRelative = "winter/" + name + ".png";
+                    custom |= File.Exists(Path.Combine(overrideSeasonalRoot, winterRelative)) ||
+                        (!assetsBySeason[(int)SeasonKind.Winter].ContainsKey(name) &&
+                         File.Exists(Path.Combine(externalSeasonalRoot, winterRelative)));
+                }
+                Texture2D texture;
+                if (custom && !TryLoadWinterTrackTexture(name, stage, out texture))
+                {
+                    validTrackSets[name] = false;
+                    return false;
+                }
+            }
+            validTrackSets[name] = true;
+            return true;
+        }
+
+        // Returned textures are repository-owned. Consumers must not destroy them.
+        // User PNGs live in Overrides/Seasonal; ordinary installations use prepared
+        // bundle textures, even when an older mod install left loose PNGs behind.
+        public bool TryLoadTexture(string sourceTextureName, SeasonKind season, out Texture2D texture)
+        {
+            texture = null;
+            var index = (int)season;
+            if (index < 0 || index >= assetsBySeason.Length) return false;
+            var name = CanonicalTextureName(sourceTextureName);
+            var relative = season.ToString().ToLowerInvariant() + "/" + name + ".png";
+            if (TryLoadProfileTexture(relative, assetsBySeason[index], name, out texture)) return true;
+            int layer;
+            return TryParseTerrainLayerIndex(name, out layer) && TryGetTerrainLayer(season, layer, out texture);
+        }
+
+        public bool TryLoadWinterTrackTexture(string sourceTextureName,
+            WinterTrackTextureStage stage, out Texture2D texture)
+        {
+            texture = null;
+            var stageIndex = (int)stage - 1;
+            if (stageIndex < 0 || stageIndex >= winterTrackAssets.Length) return false;
+            var name = CanonicalTextureName(sourceTextureName);
+            var relative = "winter_track/" + GetWinterTrackStageFolder(stage) + "/" + name + ".png";
+            if (TryLoadProfileTexture(relative, winterTrackAssets[stageIndex], name, out texture)) return true;
+            return stage == WinterTrackTextureStage.Late && IsSleeperTexture(name) &&
+                TryLoadTexture(name, SeasonKind.Winter, out texture);
+        }
+
+        private bool TryLoadProfileTexture(string relative, Dictionary<string, string> assets,
+            string name, out Texture2D texture)
+        {
+            texture = null;
+            if (loadedTextures.TryGetValue(relative, out texture) && texture != null) return true;
+            if (checkedOverrides.Add(relative) && TryLoadExternalTexture(
+                Path.Combine(overrideSeasonalRoot, relative), name, out texture))
+            {
+                loadedTextures[relative] = texture;
+                return true;
+            }
+            string assetName;
+            if (EnsureBundleLoaded(true) && assets.TryGetValue(name, out assetName))
+            {
+                texture = LoadPackedTexture(assetName);
+                if (texture != null)
+                {
+                    texture.hideFlags |= HideFlags.DontUnloadUnusedAsset;
+                    loadedTextures[relative] = texture;
+                    return true;
+                }
+            }
+            // Old custom texture packs remain usable if their key is not bundled.
+            // Never decode the former distribution PNG while its bundle is loading.
+            if (bundleLoadRequest == null && bundleLoadFinished && winterBundleLoadFinished && tracksBundleLoadFinished &&
+                TryLoadExternalTexture(Path.Combine(externalSeasonalRoot, relative), name, out texture))
+            {
+                loadedTextures[relative] = texture;
+                return true;
+            }
+            return false;
         }
 
         public bool TryLoadWinterTrackPixels(string sourceTextureName,
             WinterTrackTextureStage stage, int width, int height, out Color32[] pixels)
         {
             pixels = null;
-            var stageIndex = (int)stage - 1;
-            if (stageIndex < 0 || stageIndex >= winterTrackAssets.Length) return false;
-            var normalizedName = CanonicalTextureName(sourceTextureName);
-            var cacheKey = PixelCacheKey("track", stageIndex, normalizedName, width, height);
+            if (width <= 0 || height <= 0) return false;
+            var cacheKey = PixelCacheKey("track", (int)stage - 1, sourceTextureName, width, height);
             if (loadedPixelProfiles.TryGetValue(cacheKey, out pixels)) return true;
-
-            var stageFolder = GetWinterTrackStageFolder(stage);
-            if (stageFolder == null) return false;
-            var path = Path.Combine(externalSeasonalRoot, "winter_track", stageFolder,
-                normalizedName + ".png");
-            if (TryLoadExternalPath(path, "winter track " + stage,
-                sourceTextureName, width, height, out pixels))
-            {
-                loadedPixelProfiles[cacheKey] = pixels;
-                return true;
-            }
-
-            // The authored full-winter sleeper is byte-identical to the late-stage
-            // sleeper. Keeping one canonical PNG avoids four copies while preserving
-            // both game texture names and the complete three-stage track profile.
-            if (stage == WinterTrackTextureStage.Late && IsSleeperTexture(normalizedName))
-            {
-                var winterPath = Path.Combine(externalSeasonalRoot, "winter",
-                    normalizedName + ".png");
-                if (TryLoadExternalPath(winterPath, "winter track " + stage,
-                    sourceTextureName, width, height, out pixels))
-                {
-                    loadedPixelProfiles[cacheKey] = pixels;
-                    return true;
-                }
-            }
-
-            string assetName;
-            if (EnsureBundleLoaded() &&
-                winterTrackAssets[stageIndex].TryGetValue(
-                    normalizedName, out assetName))
-            {
-                var packed = Bundle.LoadAsset<Texture2D>(assetName);
-                if (packed != null)
-                {
-                    pixels = ReadScaledPixels(packed, width, height);
-                    if (pixels != null)
-                    {
-                        loadedPixelProfiles[cacheKey] = pixels;
-                        return true;
-                    }
-                }
-            }
-
-            if (stage == WinterTrackTextureStage.Late && IsSleeperTexture(normalizedName) &&
-                EnsureBundleLoaded() && assetsBySeason[(int)SeasonKind.Winter].TryGetValue(
-                    normalizedName, out assetName))
-            {
-                var packed = Bundle.LoadAsset<Texture2D>(assetName);
-                if (packed != null)
-                {
-                    pixels = ReadScaledPixels(packed, width, height);
-                    if (pixels != null)
-                    {
-                        loadedPixelProfiles[cacheKey] = pixels;
-                        return true;
-                    }
-                }
-            }
-
-            return false;
+            Texture2D texture;
+            if (!TryLoadWinterTrackTexture(sourceTextureName, stage, out texture)) return false;
+            pixels = ReadScaledPixels(texture, width, height);
+            if (pixels != null) loadedPixelProfiles[cacheKey] = pixels;
+            return pixels != null;
         }
-
         public Color32[] LoadPixels(string sourceTextureName, SeasonKind season, int width, int height)
         {
             Color32[] pixels;
@@ -277,48 +450,15 @@ namespace DVSeasons.Mod
             out Color32[] pixels)
         {
             pixels = null;
-            var normalizedName = CanonicalTextureName(sourceTextureName);
-            var cacheKey = PixelCacheKey("season", (int)season, normalizedName, width, height);
+            if (width <= 0 || height <= 0) return false;
+            var cacheKey = PixelCacheKey("season", (int)season, sourceTextureName, width, height);
             if (loadedPixelProfiles.TryGetValue(cacheKey, out pixels)) return true;
-            // Loose PNGs are intentional hotfix/override assets. Prefer them to
-            // the packed copy so a corrected atlas does not require the large
-            // terrain bundle to be rebuilt for every texture-only update.
-            if (TryLoadExternalPixels(sourceTextureName, season, width, height, out pixels))
-            {
-                loadedPixelProfiles[cacheKey] = pixels;
-                return true;
-            }
-            string assetName;
-            if (EnsureBundleLoaded() &&
-                assetsBySeason[(int)season].TryGetValue(normalizedName, out assetName))
-            {
-                var packed = Bundle.LoadAsset<Texture2D>(assetName);
-                if (packed != null)
-                {
-                    pixels = ReadScaledPixels(packed, width, height);
-                    if (pixels != null)
-                    {
-                        loadedPixelProfiles[cacheKey] = pixels;
-                        return true;
-                    }
-                }
-            }
-
-            int terrainLayerIndex;
-            Texture2D terrainLayer;
-            if (TryParseTerrainLayerIndex(normalizedName, out terrainLayerIndex) &&
-                TryGetTerrainLayer(season, terrainLayerIndex, out terrainLayer))
-            {
-                pixels = ReadScaledPixels(terrainLayer, width, height);
-                if (pixels != null)
-                {
-                    loadedPixelProfiles[cacheKey] = pixels;
-                    return true;
-                }
-            }
-            return false;
+            Texture2D texture;
+            if (!TryLoadTexture(sourceTextureName, season, out texture)) return false;
+            pixels = ReadScaledPixels(texture, width, height);
+            if (pixels != null) loadedPixelProfiles[cacheKey] = pixels;
+            return pixels != null;
         }
-
         public bool TryLoadBareTreeBillboardPixels(string sourceTextureName, int width, int height,
             out Color32[] pixels)
         {
@@ -334,7 +474,7 @@ namespace DVSeasons.Mod
             if (!assetsBySeason[(int)SeasonKind.Winter].TryGetValue(
                 NormalizeName("T_Maple_01_Cross_A_T"), out assetName))
                 return false;
-            var atlas = Bundle.LoadAsset<Texture2D>(assetName);
+            var atlas = LoadPackedTexture(assetName);
             if (atlas == null || atlas.height <= 0) return false;
 
             var sourceFrameCount = Mathf.RoundToInt(atlas.width / (float)atlas.height);
@@ -344,11 +484,24 @@ namespace DVSeasons.Mod
 
             var targetFrameWidth = width / targetFrameCount;
             var scaledWidth = targetFrameWidth * sourceFrameCount;
-            var scaled = ReadScaledPixels(atlas, scaledWidth, height);
+            var viewOffset = StableHash(sourceTextureName) % sourceFrameCount;
+            // Generated game billboard names differ, but only their bounded
+            // source-view offset affects the atlas. Share each transformed view
+            // and the scaled source, never one large pixel array per tree name.
+            var cacheKey = PixelCacheKey("bare-billboard", viewOffset,
+                "T_Maple_01_Cross_A_T", width, height);
+            if (loadedPixelProfiles.TryGetValue(cacheKey, out pixels)) return true;
+            var scaledKey = PixelCacheKey("bare-source", 0,
+                "T_Maple_01_Cross_A_T", scaledWidth, height);
+            Color32[] scaled;
+            if (!loadedPixelProfiles.TryGetValue(scaledKey, out scaled))
+            {
+                scaled = ReadScaledPixels(atlas, scaledWidth, height);
+                if (scaled != null) loadedPixelProfiles[scaledKey] = scaled;
+            }
             if (scaled == null || scaled.Length != scaledWidth * height) return false;
 
             pixels = new Color32[width * height];
-            var viewOffset = StableHash(sourceTextureName) % sourceFrameCount;
             for (var targetFrame = 0; targetFrame < targetFrameCount; targetFrame++)
             {
                 // The pack contains four real camera views while the game's generated
@@ -363,55 +516,44 @@ namespace DVSeasons.Mod
                         targetFrameWidth);
                 }
             }
+            loadedPixelProfiles[cacheKey] = pixels;
             return true;
         }
 
-        private bool TryLoadExternalPixels(string sourceTextureName, SeasonKind season,
-            int width, int height, out Color32[] pixels)
+        private bool TryLoadExternalTexture(string path, string sourceName, out Texture2D texture)
         {
-            var seasonFolder = season.ToString().ToLowerInvariant();
-            var fileName = CanonicalTextureName(sourceTextureName) + ".png";
-            var path = Path.Combine(externalSeasonalRoot, seasonFolder, fileName);
-            return TryLoadExternalPath(path, season.ToString(), sourceTextureName,
-                width, height, out pixels);
-        }
-
-        private static bool TryLoadExternalPath(string path, string profileName,
-            string sourceTextureName, int width, int height, out Color32[] pixels)
-        {
-            pixels = null;
+            texture = null;
             if (!File.Exists(path)) return false;
-
-            Texture2D texture = null;
             try
             {
-                texture = new Texture2D(2, 2, TextureFormat.RGBA32, false)
+                var linear = string.Equals(sourceName, "WaterIceNormal", StringComparison.OrdinalIgnoreCase);
+                texture = new Texture2D(2, 2, TextureFormat.RGBA32, true, linear)
                 {
-                    name = "DVSeasons external " + profileName + " " + sourceTextureName,
-                    wrapMode = TextureWrapMode.Clamp,
+                    name = "DVSeasons override " + sourceName,
+                    wrapMode = TextureWrapMode.Repeat,
                     filterMode = FilterMode.Trilinear,
                     anisoLevel = 4,
                     hideFlags = HideFlags.HideAndDontSave
                 };
-                if (!texture.LoadImage(File.ReadAllBytes(path), false)) return false;
-                pixels = ReadScaledPixels(texture, width, height);
-                if (pixels != null)
-                    Debug.Log("[DVSeasons] Loaded external " + profileName +
-                        " texture '" + sourceTextureName + "'.");
-                return pixels != null;
+                if (!texture.LoadImage(File.ReadAllBytes(path), false))
+                {
+                    UnityEngine.Object.Destroy(texture);
+                    texture = null;
+                    return false;
+                }
+                TextureDecodeCount++;
+                ownedTextures.Add(texture);
+                Debug.Log("[DVSeasons] Loaded texture override '" + path + "'.");
+                return true;
             }
             catch (Exception exception)
             {
-                Debug.LogWarning("[DVSeasons] External seasonal texture '" + path +
-                    "' could not be loaded: " + exception.Message);
+                if (texture != null) UnityEngine.Object.Destroy(texture);
+                texture = null;
+                Debug.LogWarning("[DVSeasons] Texture override '" + path + "' could not be loaded: " + exception.Message);
                 return false;
             }
-            finally
-            {
-                if (texture != null) UnityEngine.Object.Destroy(texture);
-            }
         }
-
         public bool TryLoadGenericWinterSnowPixels(int width, int height, out Color32[] pixels)
         {
             var cacheKey = PixelCacheKey("generic", 0, "winter_ballast", width, height);
@@ -428,6 +570,8 @@ namespace DVSeasons.Mod
 
         private bool TryLoadWinterBallastTexture(out Texture2D texture)
         {
+            if (TryLoadTexture("WinterBallastBalanced", SeasonKind.Winter, out texture)) return true;
+            if (!IsLoadFinished) return false;
             if (!winterBallastLoadAttempted)
             {
                 winterBallastLoadAttempted = true;
@@ -531,12 +675,14 @@ namespace DVSeasons.Mod
 
         public bool IsTerrainArray(Texture texture)
         {
-            if (texture == null || !EnsureBundleLoaded()) return false;
-            foreach (var season in terrainArrays.Keys)
-            {
-                Texture2DArray seasonal;
-                if (TryGetTerrainArray(season, out seasonal) && seasonal == texture) return true;
-            }
+            // Classification runs while discovering native materials, even in
+            // summer. Loading every seasonal array here caused a large startup
+            // stall simply to reject a vanilla texture. An array can only have
+            // been applied by this repository after TryGetTerrainArray cached it.
+            // Use the cache directly, including while another bundle is pending.
+            if (texture == null) return false;
+            foreach (var seasonal in loadedTerrainArrays.Values)
+                if (seasonal != null && seasonal == texture) return true;
             return false;
         }
 
@@ -545,6 +691,7 @@ namespace DVSeasons.Mod
             var normalized = CanonicalTextureName(sourceTextureName);
             if (EnsureBundleLoaded() && assetsBySeason[(int)season].ContainsKey(normalized)) return true;
             var seasonFolder = season.ToString().ToLowerInvariant();
+            if (File.Exists(Path.Combine(overrideSeasonalRoot, seasonFolder, normalized + ".png"))) return true;
             return File.Exists(Path.Combine(externalSeasonalRoot, seasonFolder, normalized + ".png"));
         }
 
@@ -553,6 +700,7 @@ namespace DVSeasons.Mod
             var stageIndex = (int)stage - 1;
             if (stageIndex < 0 || stageIndex >= winterTrackAssets.Length) return false;
             var normalized = CanonicalTextureName(sourceTextureName);
+            if (File.Exists(Path.Combine(overrideSeasonalRoot, "winter_track", GetWinterTrackStageFolder(stage), normalized + ".png"))) return true;
             if (EnsureBundleLoaded() && winterTrackAssets[stageIndex].ContainsKey(normalized))
                 return true;
             if (stage == WinterTrackTextureStage.Late && IsSleeperTexture(normalized))
@@ -691,8 +839,32 @@ namespace DVSeasons.Mod
             }
         }
 
-        private static Color32[] ReadScaledPixels(Texture source, int width, int height)
+        private Color32[] ReadScaledPixels(Texture source, int width, int height)
         {
+            var packed = source as Texture2D;
+            if (packed != null && packed.isReadable)
+            {
+                // Common 1024 -> 512/256/etc. requests are an exact prepared mip:
+                // copy CPU pixels directly, without a render, GPU fence or upload.
+                var mip = 0;
+                var mipWidth = packed.width;
+                var mipHeight = packed.height;
+                while (mip + 1 < packed.mipmapCount &&
+                    Mathf.Max(1, mipWidth / 2) >= width && Mathf.Max(1, mipHeight / 2) >= height)
+                {
+                    mip++;
+                    mipWidth = Mathf.Max(1, mipWidth / 2);
+                    mipHeight = Mathf.Max(1, mipHeight / 2);
+                }
+                var pixels = packed.GetPixels32(mip);
+                if (mipWidth == width && mipHeight == height) return pixels;
+                return ResizePixels(pixels, mipWidth, mipHeight, width, height,
+                    UnityEngine.Experimental.Rendering.GraphicsFormatUtility.IsSRGBFormat(packed.graphicsFormat) &&
+                    QualitySettings.activeColorSpace == ColorSpace.Linear);
+            }
+            // Compatibility for old non-readable bundles and GPU-only terrain
+            // layers. The shipped seasonal/track textures do not enter this path.
+            PixelReadbackCount++;
             var temporary = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32,
                 RenderTextureReadWrite.Default);
             var previous = RenderTexture.active;
@@ -712,6 +884,53 @@ namespace DVSeasons.Mod
                 RenderTexture.ReleaseTemporary(temporary);
                 if (readable != null) UnityEngine.Object.Destroy(readable);
             }
+        }
+
+        private static readonly float[] LinearChannel = CreateLinearChannels();
+
+        private static float[] CreateLinearChannels()
+        {
+            var result = new float[256];
+            for (var i = 0; i < result.Length; i++) result[i] = Mathf.GammaToLinearSpace(i / 255f);
+            return result;
+        }
+
+        private static Color32[] ResizePixels(Color32[] source, int sourceWidth, int sourceHeight,
+            int width, int height, bool linearSampling)
+        {
+            var output = new Color32[width * height];
+            for (var y = 0; y < height; y++)
+            {
+                var py = Mathf.Clamp((y + 0.5f) * sourceHeight / height - 0.5f, 0, sourceHeight - 1);
+                var y0 = (int)py;
+                var y1 = Mathf.Min(y0 + 1, sourceHeight - 1);
+                for (var x = 0; x < width; x++)
+                {
+                    var px = Mathf.Clamp((x + 0.5f) * sourceWidth / width - 0.5f, 0, sourceWidth - 1);
+                    var x0 = (int)px;
+                    var x1 = Mathf.Min(x0 + 1, sourceWidth - 1);
+                    var a = source[y0 * sourceWidth + x0];
+                    var b = source[y0 * sourceWidth + x1];
+                    var c = source[y1 * sourceWidth + x0];
+                    var d = source[y1 * sourceWidth + x1];
+                    var fx = px - x0;
+                    var fy = py - y0;
+                    output[y * width + x] = new Color32(
+                        ResizeChannel(a.r,b.r,c.r,d.r,fx,fy,linearSampling),
+                        ResizeChannel(a.g,b.g,c.g,d.g,fx,fy,linearSampling),
+                        ResizeChannel(a.b,b.b,c.b,d.b,fx,fy,linearSampling),
+                        ResizeChannel(a.a,b.a,c.a,d.a,fx,fy,false));
+                }
+            }
+            return output;
+        }
+
+        private static byte ResizeChannel(byte a, byte b, byte c, byte d, float x, float y, bool linear)
+        {
+            if (!linear) return (byte)Mathf.RoundToInt(Mathf.Lerp(Mathf.Lerp(a,b,x),Mathf.Lerp(c,d,x),y));
+            var value = Mathf.Lerp(Mathf.Lerp(LinearChannel[a],LinearChannel[b],x),
+                Mathf.Lerp(LinearChannel[c],LinearChannel[d],x),y);
+            return (byte)Mathf.RoundToInt(Mathf.LinearToGammaSpace(value) * 255f);
         }
     }
 }

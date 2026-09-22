@@ -16,6 +16,7 @@ namespace DVSeasons.Mod
     {
         private sealed class Binding
         {
+            public string CarId;
             public GameObject Interior;
             public ControlImplBase Control;
             public bool Known, HasSwitch;
@@ -28,6 +29,7 @@ namespace DVSeasons.Mod
             public bool RpmIsNormalized = true;
             public PortReference TemperatureReference;
             public readonly EngineCabHeat Heat = new EngineCabHeat();
+            public readonly CatenaryCabPower Electric = new CatenaryCabPower();
             public float LastUpdate = Time.time;
             public readonly WindowWinterClimate Climate = new WindowWinterClimate();
             public float LastClimate = Time.time;
@@ -41,7 +43,9 @@ namespace DVSeasons.Mod
             public float NextDiagnostic;
         }
         private readonly Dictionary<TrainCar, Binding> bindings = new Dictionary<TrainCar, Binding>();
+        private readonly List<TrainCar> expiredBindings = new List<TrainCar>();
         private readonly Dictionary<string, WindowClimateState> savedClimates = new Dictionary<string, WindowClimateState>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> retiredClimateIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<TrainCarType> stockTypes = ReadStockTypes();
 
         private static HashSet<TrainCarType> ReadStockTypes()
@@ -64,6 +68,7 @@ namespace DVSeasons.Mod
             if (globals != null && globals.Types != null) globals.Types.TrainCarType_to_v2.TryGetValue(car.carType, out stock);
             return IsCustomType(car.carType, car.carLivery, stock);
         }
+        internal static bool IsStockType(TrainCarType type) => type!=TrainCarType.NotSet && stockTypes.Contains(type);
 
         internal static bool IsCustomType(TrainCarType legacyType, TrainCarLivery livery, TrainCarLivery stock)
         { return legacyType == TrainCarType.NotSet || !stockTypes.Contains(legacyType) ||
@@ -76,9 +81,14 @@ namespace DVSeasons.Mod
             Binding binding;
             if (!bindings.TryGetValue(car, out binding))
             {
+                // A replacement can be queried before the half-second cleanup.
+                // Capture its destroyed predecessor before restoring this GUID.
+                PruneDestroyed();
                 binding = new Binding(); bindings.Add(car, binding);
+                RefreshBindingIdentity(car, binding);
+                binding.Electric.Bind(car, null);
                 WindowClimateState saved;
-                if (savedClimates.Count > 0 && !string.IsNullOrEmpty(car.CarGUID) && savedClimates.TryGetValue(car.CarGUID, out saved))
+                if (savedClimates.Count > 0 && !string.IsNullOrEmpty(binding.CarId) && savedClimates.TryGetValue(binding.CarId, out saved))
                     binding.Climate.Restore(saved);
                 // The prefab establishes switch presence even when the interior
                 // has never streamed in. An unloaded switch never enables fallback.
@@ -86,6 +96,7 @@ namespace DVSeasons.Mod
                 if (prefab != null)
                 { binding.Known = true; FindHeater(prefab, out binding.HasSwitch); }
             }
+            else RefreshBindingIdentity(car, binding);
             var interior = car.loadedInterior;
             if (interior != null && interior != binding.Interior)
             {
@@ -103,6 +114,14 @@ namespace DVSeasons.Mod
             }
             float engineHeat = EngineHeat(car, binding);
             if (binding.Control != null) binding.LastLevel = Mathf.Clamp01(binding.Control.Value);
+            if (binding.Electric.Supported)
+            {
+                // A real switch still takes priority, but cannot energize a
+                // heater while the main breaker is open or the supply is dead.
+                level = binding.HasSwitch ? binding.LastLevel * binding.Electric.Power
+                    : enabled && binding.Known ? binding.Electric.Power : 0;
+                return true;
+            }
             if (binding.HasSwitch) level = binding.LastLevel;
             else if (binding.Known)
             {
@@ -149,7 +168,9 @@ namespace DVSeasons.Mod
             var sim = car.SimController;
             if (sim != null && sim.firebox != null && sim.firebox.IsFireOn) { running = true; level = Math.Max(level, .85f); }
             float elapsed = Mathf.Max(0, Time.time - binding.LastClimate); binding.LastClimate = Time.time;
-            if (engineSource)
+            if (binding.Electric.Supported)
+                binding.Climate.AdvanceElectricHeated(elapsed, outside, level, open, snow);
+            else if (engineSource)
                 binding.Climate.AdvanceEngineHeated(elapsed, outside, running,
                     EngineTemperature(binding, outside), level, open, snow);
             else
@@ -169,10 +190,10 @@ namespace DVSeasons.Mod
                     doors.Append(CabOpeningScope.Includes(binding.OpeningPositions[i], binding.CabBoundary, cabSide) ? " local" : " other-cab");
                 }
                 Debug.Log(string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                    "[DVSeasons] Cab heat {0}: running={1}, rpm={2:F3}, source={3}, power={4:F3}, outside={5:F1}, air={6:F1}, glass={7:F1}, open={8}, cabSide={9}, switch={10}; doors=[{11}]",
+                    "[DVSeasons] Cab heat {0}: running={1}, rpm={2:F3}, source={3}, power={4:F3}, outside={5:F1}, air={6:F1}, glass={7:F1}, open={8}, cabSide={9}, switch={10}; doors=[{11}], supply={12:F1} V",
                     car.name, running, binding.EngineRpm != null ? binding.EngineRpm.Value : float.NaN,
-                    engineSource ? "engine" : "switch/disabled", level, outside, binding.Climate.CabinTemperature,
-                    binding.Climate.GlassTemperature, open, cabSide, binding.Control != null ? binding.Control.name : binding.HasSwitch ? "unloaded" : "none", doors));
+                    binding.Electric.Supported ? "catenary" : engineSource ? "engine" : "switch/disabled", level, outside, binding.Climate.CabinTemperature,
+                    binding.Climate.GlassTemperature, open, cabSide, binding.Control != null ? binding.Control.name : binding.HasSwitch ? "unloaded" : "none", doors, binding.Electric.Voltage));
             }
             return binding.Climate;
         }
@@ -219,6 +240,8 @@ namespace DVSeasons.Mod
             {
                 binding.Flow = flow; binding.EngineOn = binding.EngineRpm = binding.EngineTemperature = null;
                 binding.IdleRpm = binding.MaximumRpm = null; binding.RpmIsNormalized = true; binding.TemperatureReference = null;
+                binding.Electric.Bind(car, flow);
+                if (binding.Electric.Supported) return 0;
                 if (flow != null) foreach (var component in flow.OrderedSimComps)
                 {
                     var field = component.GetType().GetField("engineOnReadOut");
@@ -253,6 +276,7 @@ namespace DVSeasons.Mod
                     if ((name.Contains("engine") || name.Contains("diesel")) && name.Contains("temperature")) binding.EngineTemperature = port;
                 }
             }
+            if (binding.Electric.Supported) return 0;
             bool running = binding.EngineOn != null ? binding.EngineOn.Value > .5f
                 : binding.EngineRpm != null && binding.EngineRpm.Value > .05f;
             float elapsed = Mathf.Max(0, Time.time - binding.LastUpdate); binding.LastUpdate = Time.time;
@@ -290,7 +314,7 @@ namespace DVSeasons.Mod
 
         public void RestoreClimates(List<CabFrostState> records)
         {
-            savedClimates.Clear();
+            savedClimates.Clear(); retiredClimateIds.Clear();
             if (records == null) return;
             foreach (var record in records)
                 if (record != null && !string.IsNullOrEmpty(record.Id) && record.Id.Length <= 80 && record.Climate != null && record.Climate.IsValid())
@@ -298,10 +322,46 @@ namespace DVSeasons.Mod
         }
         public void SaveClimates(IDictionary<string, WindowClimateState> destination)
         {
+            // RestoreClimates receives native cabs too. Publish only retired
+            // custom bindings here; copying all restored records would replace
+            // newer native-cab temperatures already written by winter windows.
+            foreach (var id in retiredClimateIds) destination[id] = savedClimates[id];
             foreach (var pair in bindings)
-                if (pair.Key != null && pair.Key.logicCar != null && !string.IsNullOrEmpty(pair.Key.CarGUID))
-                    destination[pair.Key.CarGUID] = pair.Value.Climate.Capture();
+                if (RefreshBindingIdentity(pair.Key, pair.Value))
+                    destination[pair.Value.CarId] = pair.Value.Climate.Capture();
         }
-        public void Clear() { bindings.Clear(); savedClimates.Clear(); }
+        private bool RefreshBindingIdentity(TrainCar car, Binding binding)
+        {
+            // Streaming can bind controls before the logic car gets its GUID.
+            // Avoid the native getter's missing-logic warning, and retain the
+            // last valid identity when a pooled/destroyed car loses its logic.
+            if (car == null || car.logicCar == null) return false;
+            string id = car.CarGUID;
+            if (string.IsNullOrEmpty(id) || id.Length > 80) return false;
+            binding.CarId = id;
+            retiredClimateIds.Remove(id);
+            return true;
+        }
+        public void PruneDestroyed()
+        {
+            expiredBindings.Clear();
+            foreach (var pair in bindings)
+            {
+                // Unity keeps destroyed objects' managed wrappers alive. Do not
+                // retain their interiors, controls and simulation ports for the
+                // entire session; only the small climate state needs to survive.
+                if (pair.Key != null) continue;
+                var binding = pair.Value;
+                if (!string.IsNullOrEmpty(binding.CarId) && binding.CarId.Length <= 80)
+                {
+                    savedClimates[binding.CarId] = binding.Climate.Capture();
+                    retiredClimateIds.Add(binding.CarId);
+                }
+                expiredBindings.Add(pair.Key);
+            }
+            foreach (var car in expiredBindings) bindings.Remove(car);
+            expiredBindings.Clear();
+        }
+        public void Clear() { bindings.Clear(); expiredBindings.Clear(); savedClimates.Clear(); retiredClimateIds.Clear(); }
     }
 }

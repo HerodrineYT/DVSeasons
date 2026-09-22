@@ -21,6 +21,7 @@ namespace DVSeasons.Core
         public float Fog { get; private set; }
         public WinterGlassStage Stage { get; private set; }
         private bool initialized;
+        public bool IsInitialized { get { return initialized; } }
 
         public void Advance(float seconds, float outside, bool running, float engineTemperature,
             float heater, bool openings, float winterCoverage)
@@ -32,6 +33,17 @@ namespace DVSeasons.Core
             float heat, bool openings, float winterCoverage)
         { AdvanceCore(seconds, outside, running, engineTemperature,
             (float)Math.Sqrt(Clamp(Finite(heat, 0))), openings, winterCoverage, true); }
+
+        // A catenary-fed resistance heater does not wait for a diesel engine to
+        // warm up, and traction motor heat must not keep feeding it after a trip.
+        // Heater, cabin and glass temperatures retain their own thermal inertia.
+        public void AdvanceElectricHeated(float seconds, float outside, float power,
+            bool openings, float winterCoverage)
+        {
+            EngineWarmth = 0;
+            AdvanceCore(seconds, outside, false, 20f,
+                (float)Math.Sqrt(Clamp(Finite(power, 0))), openings, winterCoverage, true);
+        }
 
         private void AdvanceCore(float seconds, float outside, bool running, float engineTemperature,
             float heater, bool openings, float winterCoverage, bool directEngineHeat)
@@ -104,6 +116,8 @@ namespace DVSeasons.Core
             initialized=state.Initialized; EngineWarmth=state.EngineWarmth;
             HeaterTemperature=state.Heater; CabinTemperature=state.Cabin;
             GlassTemperature=state.Glass; Frost=state.Frost; Fog=state.Fog;
+            Stage = Frost > .1f ? (GlassTemperature > 0 ? WinterGlassStage.Thawing : WinterGlassStage.Frozen)
+                : Fog > .07f ? WinterGlassStage.Fogged : WinterGlassStage.Wet;
         }
         private static float Clamp(float v) { return Math.Max(0, Math.Min(1, v)); }
         private static float SmoothRange(float low, float high, float value)

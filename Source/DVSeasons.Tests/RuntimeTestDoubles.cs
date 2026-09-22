@@ -100,8 +100,18 @@ namespace UnityModManagerNet
 
 namespace DVSeasons.Mod
 {
+    internal static class SnowPerformance
+    {
+        public static IDisposable Measure(string name) { return null; }
+    }
     internal sealed class SeasonalThermalController : IDisposable
     {
+        public static bool IgnoreVanillaColdStarts, HintsEnabled;
+        public static ColdStartHintState[] IncomingHints=ColdStartHintState.Empty,OutgoingHints=ColdStartHintState.Empty;
+        public void ConfigureStarting(bool ignore) { IgnoreVanillaColdStarts=ignore; }
+        public void UpdateStartHints(bool enabled,bool localAuthority) { HintsEnabled=enabled; }
+        public void ReceiveStartHints(ColdStartHintState[] hints) { IncomingHints=hints; }
+        public ColdStartHintState[] CaptureStartHints() { return OutgoingHints; }
         public static float LastApplied = float.NaN;
         public static int ResetCount;
         public static bool SimulateLocally;
@@ -120,6 +130,7 @@ namespace DVSeasons.Mod
     }
     internal sealed class WeatherAdapter : IDisposable
     {
+        public void ApplyBlizzard(bool active) { }
         public static WeatherAdapter LastCreated;
         public Func<bool> WeatherAuthority;
         public Action WeatherEdited;
@@ -218,6 +229,8 @@ namespace DVSeasons.Mod
 
     internal sealed class CabHeaterService : IDisposable
     {
+        public static VehicleThermalNetworkState[] LastThermal = VehicleThermalNetworkState.Empty;
+        public void ApplyThermalNetworkState(VehicleThermalNetworkState[] states) { LastThermal = states; }
         public bool EngineHeatingWithoutSwitch;
         public float OutsideTemperature, SnowCoverage;
         public CabHeaterService(DVSeasons.Core.ISeasonNetworkBridge bridge) { }
@@ -229,9 +242,33 @@ namespace DVSeasons.Mod
     }
     internal sealed class SeasonVisualController : IDisposable
     {
+        public static VehicleThermalNetworkState[] LastThermal = VehicleThermalNetworkState.Empty;
+        public static VehicleThermalNetworkState[] OutgoingThermal = VehicleThermalNetworkState.Empty;
+        public static bool ThermalUsesHost;
+        public void SetThermalNetworkAuthority(bool useHost) { ThermalUsesHost = useHost; }
+        public void ApplyThermalNetworkState(VehicleThermalNetworkState[] states) { LastThermal = states; }
+        public VehicleThermalNetworkState[] CaptureThermalNetworkState() { return OutgoingThermal; }
+        public void UpdateSimulation(SeasonState state, float snow, UnityEngine.Vector3 wind, float seconds,
+            bool multiplayer, SeasonModSettings settings) { }
+        public float BlizzardIntensity = 1f;
         public static int ResetCount;
         public static int SelectionCount;
         public static float? LastHostCoverage;
+        public static VehicleSideSnowNetworkState[] OutgoingSideSnow = VehicleSideSnowNetworkState.Empty;
+        public static VehicleSideSnowNetworkState[] LastHostSideSnow = VehicleSideSnowNetworkState.Empty;
+        public static int SideSnowCaptureCount, SideSnowApplyCount;
+        public static bool SideSnowNetworkAuthority;
+        public VehicleSideSnowNetworkState[] CaptureSideSnowNetworkState()
+        {
+            SideSnowCaptureCount++;
+            return (VehicleSideSnowNetworkState[])OutgoingSideSnow.Clone();
+        }
+        public void ApplySideSnowNetworkState(VehicleSideSnowNetworkState[] states)
+        {
+            LastHostSideSnow = states;
+            SideSnowApplyCount++;
+        }
+        public void SetSideSnowNetworkAuthority(bool authoritative) { SideSnowNetworkAuthority = authoritative; }
         public float? SurfaceSnowCoverage => null;
         public void SetNetworkSnowCoverage(float? coverage) { LastHostCoverage = coverage; }
         public static SaveGameData SnowRestoredFrom, SnowWrittenTo;
@@ -241,8 +278,14 @@ namespace DVSeasons.Mod
         public void BeginSession(bool multiplayerSession) { }
         public void RestoreSnow(SaveGameData data) { SnowRestoredFrom=data; }
         public void SaveSnow(SaveGameData data) { SnowWrittenTo=data; }
-        public void OnSeasonSelected() { SelectionCount++; }
-        public void ResetForSession() { ResetCount++; LastApplied = null; }
+        public void OnSeasonSelected() { SelectionCount++; LastHostSideSnow = VehicleSideSnowNetworkState.Empty; }
+        public void ResetForSession()
+        {
+            ResetCount++; LastApplied = null;
+            LastThermal = VehicleThermalNetworkState.Empty; ThermalUsesHost = false;
+            LastHostSideSnow = VehicleSideSnowNetworkState.Empty;
+            SideSnowNetworkAuthority = false;
+        }
         public void Apply(SeasonState state, float snow, float rain, UnityEngine.Vector3 wind,
             float light, SeasonModSettings settings)
         {

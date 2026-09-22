@@ -1238,7 +1238,10 @@ namespace DVSeasons.Mod
         }
 
         private readonly SeasonAssetBundleRepository repository;
-        public AutumnLeafGroundController(SeasonAssetBundleRepository repository) { this.repository = repository; }
+        private readonly string modPath;
+        public AutumnLeafGroundController(SeasonAssetBundleRepository repository) : this(repository, null) { }
+        public AutumnLeafGroundController(SeasonAssetBundleRepository repository, string modPath)
+        { this.repository = repository; this.modPath = modPath; }
 
         private void EnsureRenderer()
         {
@@ -1267,7 +1270,7 @@ namespace DVSeasons.Mod
             // The game's quality presets enable soft particles. Their depth fade
             // makes a leaf resting 18 mm above the surface almost transparent,
             // so use a vertex-coloured shader without soft-particle fading.
-            texture = AutumnLeafParticleTexture.Create("DVSeasons Physical Autumn Leaf");
+            texture = AutumnLeafParticleTexture.LoadOrCreate(modPath, "DVSeasons Physical Autumn Leaf");
             material = new Material(shader)
             {
                 name = "DVSeasons Physical Autumn Leaves",

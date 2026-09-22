@@ -12,6 +12,25 @@ public sealed class SnowModeSettingsTests
         var settings = Read("<SeasonModSettings />");
         settings.Clamp();
         Assert.True(settings.ProceduralSnowEnabled);
+        Assert.Equal(0, settings.SnowObjectLimit);
+    }
+
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(1, 1)]
+    [InlineData(50, 50)]
+    [InlineData(10000, 10000)]
+    [InlineData(-9, 0)]
+    [InlineData(20000, 10000)]
+    public void ObjectSnowLimitSurvivesSaveAndIsBounded(int input, int expected)
+    {
+        var settings = Read("<SeasonModSettings><SnowObjectLimit>" + input +
+            "</SnowObjectLimit></SeasonModSettings>");
+        var entry = new UnityModManager.ModEntry();
+        settings.Save(entry);
+        var restored = Read(entry.SavedSettingsXml);
+        restored.Clamp();
+        Assert.Equal(expected, restored.SnowObjectLimit);
     }
 
     [Theory]

@@ -169,6 +169,82 @@ namespace DVSeasons.Tests
             return state;
         }
         [Fact]
+        public void ColdStartRuleAndHintsReachClientsAndLateJoinWithOwnedSnapshot()
+        {
+            using(var host=new Server())
+            {
+                var first=host.AddClient();var second=host.AddClient();var state=Winter();
+                state.IgnoreVanillaColdStarts=true;
+                state.ColdStarts=new[]{new ColdStartHintState{CarId="custom-diesel",Stage=ColdStartHintStage.Starter,RemainingSeconds=9}};
+                host.Publish(state);var expected=state.ColdStarts[0];state.ColdStarts[0].RemainingSeconds=0;
+                Assert.True(first.Seasons[first.Seasons.Count-1].IgnoreVanillaColdStarts);
+                Assert.Equal(expected,second.Seasons[second.Seasons.Count-1].ColdStarts[0]);
+                var late=host.AddClient();host.Ready(late);
+                Assert.Equal(expected,late.Seasons[late.Seasons.Count-1].ColdStarts[0]);
+                host.Publish(Winter());
+                Assert.Empty(first.Seasons[first.Seasons.Count-1].ColdStarts);
+                Assert.False(first.Seasons[first.Seasons.Count-1].IgnoreVanillaColdStarts);
+            }
+        }
+        [Fact]
+        public void ThermalSnapshotsReachTwoClientsAndLateJoinAndCannotBeMutatedAfterPublish()
+        {
+            using (var host = new Server())
+            {
+                var first = host.AddClient(); var second = host.AddClient();
+                var packet = VehicleThermalNetworkTests.Packet();
+                var expected = (VehicleThermalNetworkState[])packet.VehicleThermal.Clone();
+                host.Publish(packet);
+                Assert.Equal(expected, first.Seasons[first.Seasons.Count - 1].VehicleThermal);
+                Assert.Equal(expected, second.Seasons[second.Seasons.Count - 1].VehicleThermal);
+                packet.VehicleThermal[0].Cabin = 140;
+                host.Publish(Winter());
+                Assert.False(first.Seasons[first.Seasons.Count - 1].HasThermalSnapshot);
+                var late = host.AddClient(); host.Ready(late);
+                Assert.True(late.Seasons[late.Seasons.Count - 1].HasThermalSnapshot);
+                Assert.Equal(expected, late.Seasons[late.Seasons.Count - 1].VehicleThermal);
+                var cleared = Winter(); cleared.HasThermalSnapshot = true;
+                host.Publish(cleared);
+                var next = host.AddClient(); host.Ready(next);
+                Assert.Empty(next.Seasons[next.Seasons.Count - 1].VehicleThermal);
+            }
+        }
+        [Fact]
+        public void LateJoinReceivesAllFourFacesAfterWeatherOnlyEditsAndSnapshotOwnsItsArray()
+        {
+            using (var host = new Server())
+            {
+                var first = host.AddClient();
+                var state = Winter();
+                state.HasSideSnowSnapshot = true;
+                state.SideSnow = new[] { new VehicleSideSnowNetworkState
+                {
+                    CarId = "de6-a", PositiveX = .2f, NegativeX = .4f, PositiveZ = .8f, NegativeZ = 1f
+                } };
+                host.Publish(state);
+                Assert.True(first.Seasons[first.Seasons.Count - 1].HasSideSnowSnapshot);
+                state.SideSnow[0] = new VehicleSideSnowNetworkState { CarId = "mutated", PositiveX = 1f };
+                host.Publish(Winter()); // A weather edit carries no new fleet history.
+                Assert.False(first.Seasons[first.Seasons.Count - 1].HasSideSnowSnapshot);
+                var late = host.AddClient();
+                host.Ready(late);
+                var received = late.Seasons[late.Seasons.Count - 1];
+                Assert.True(received.HasSideSnowSnapshot);
+                var snow = Assert.Single(received.SideSnow);
+                Assert.Equal("de6-a", snow.CarId);
+                Assert.InRange(snow.PositiveX, .1999f, .2001f);
+                Assert.InRange(snow.NegativeX, .3999f, .4001f);
+                Assert.InRange(snow.PositiveZ, .7999f, .8001f);
+                Assert.Equal(1f, snow.NegativeZ);
+
+                var cleared = Winter(); cleared.HasSideSnowSnapshot = true;
+                host.Publish(cleared);
+                var afterClear = host.AddClient(); host.Ready(afterClear);
+                Assert.Empty(afterClear.Seasons[afterClear.Seasons.Count - 1].SideSnow);
+            }
+        }
+
+        [Fact]
         public void HostAndTwoClientsReceiveWeatherSnowAndIndependentHeaterChanges()
         {
             using (var host = new Server())

@@ -3,7 +3,7 @@
     <TargetFramework>net48</TargetFramework>
     <AssemblyName>DVSeasons</AssemblyName>
     <RootNamespace>DVSeasons.Mod</RootNamespace>
-    <Version>0.3.2</Version>
+    <Version>0.3.3</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <DVSeasonsRuntimeResources Condition="'$(DVSeasonsRuntimeResources)' == '' and Exists('$(MSBuildProjectDirectory)\..\Resources\Runtime\AssetBundles\dvseasons_dv99')">$(MSBuildProjectDirectory)\..\Resources\Runtime</DVSeasonsRuntimeResources>
     <DVSeasonsRuntimeResources Condition="'$(DVSeasonsRuntimeResources)' == '' and Exists('$(MSBuildProjectDirectory)\..\..\AssetBundles\dvseasons_dv99')">$(MSBuildProjectDirectory)\..\..</DVSeasonsRuntimeResources>
@@ -14,8 +14,17 @@
   </ItemGroup>
   <ItemGroup>
     <Reference Include="UnityEngine"><HintPath>$(DVManagedDir)\UnityEngine.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="DV.Inventory"><HintPath>$(DVManagedDir)\DV.Inventory.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="DV.SpriteLights"><HintPath>$(DVManagedDir)\DV.SpriteLights.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="DV.TimeBasedEvents"><HintPath>$(DVManagedDir)\DV.TimeBasedEvents.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="DV.LightingKludge"><HintPath>$(DVManagedDir)\DV.LightingKludge.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="BakeryRuntimeAssembly"><HintPath>$(DVManagedDir)\BakeryRuntimeAssembly.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Unity.TextMeshPro"><HintPath>$(DVManagedDir)\Unity.TextMeshPro.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UnityWebRequestModule"><HintPath>$(DVManagedDir)\UnityEngine.UnityWebRequestModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UnityWebRequestAudioModule"><HintPath>$(DVManagedDir)\UnityEngine.UnityWebRequestAudioModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Newtonsoft.Json"><HintPath>$(DVManagedDir)\Newtonsoft.Json.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="DV.UI"><HintPath>$(DVManagedDir)\DV.UI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="DV.UIFramework"><HintPath>$(DVManagedDir)\DV.UIFramework.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="DV.CabControls.Spec"><HintPath>$(DVManagedDir)\DV.CabControls.Spec.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="DV.Interaction"><HintPath>$(DVManagedDir)\DV.Interaction.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="DV.Common"><HintPath>$(DVManagedDir)\DV.Common.dll</HintPath><Private>false</Private></Reference>
@@ -25,12 +34,17 @@
     <Reference Include="DVLangHelper.Runtime"><HintPath>$(DVModsDir)\DVLangHelper\DVLangHelper.Runtime.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="DVLangHelper.Data"><HintPath>$(DVModsDir)\DVLangHelper\DVLangHelper.Data.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.CoreModule"><HintPath>$(DVManagedDir)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.XRModule"><HintPath>$(DVManagedDir)\UnityEngine.XRModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.VRModule"><HintPath>$(DVManagedDir)\UnityEngine.VRModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.IMGUIModule"><HintPath>$(DVManagedDir)\UnityEngine.IMGUIModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UI"><HintPath>$(DVManagedDir)\UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UIModule"><HintPath>$(DVManagedDir)\UnityEngine.UIModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.ImageConversionModule"><HintPath>$(DVManagedDir)\UnityEngine.ImageConversionModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.AssetBundleModule"><HintPath>$(DVManagedDir)\UnityEngine.AssetBundleModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.AudioModule"><HintPath>$(DVManagedDir)\UnityEngine.AudioModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.ParticleSystemModule"><HintPath>$(DVManagedDir)\UnityEngine.ParticleSystemModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(DVManagedDir)\UnityEngine.PhysicsModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.AnimationModule"><HintPath>$(DVManagedDir)\UnityEngine.AnimationModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.TerrainModule"><HintPath>$(DVManagedDir)\UnityEngine.TerrainModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="DV.OriginShiftInfo"><HintPath>$(DVManagedDir)\DV.OriginShiftInfo.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="DV.TerrainSystem"><HintPath>$(DVManagedDir)\DV.TerrainSystem.dll</HintPath><Private>false</Private></Reference>
@@ -56,8 +70,8 @@
     <None Include="$(DVSeasonsRuntimeResources)\Localization\*.csv"
           Link="Localization\%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="$(DVSeasonsRuntimeResources)\AssetBundles\dvseasons_dv99"
-          Link="AssetBundles\dvseasons_dv99"
+    <None Include="$(DVSeasonsRuntimeResources)\AssetBundles\dvseasons_dv99;$(DVSeasonsRuntimeResources)\AssetBundles\dvseasons_winter;$(DVSeasonsRuntimeResources)\AssetBundles\dvseasons_tracks"
+          Link="AssetBundles\%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(DVSeasonsRuntimeResources)\Textures\snowflake_realistic.png"
           Link="Textures\snowflake_realistic.png"
@@ -65,13 +79,13 @@
     <None Include="$(DVSeasonsRuntimeResources)\Textures\snowflake_variations.png"
           Link="Textures\snowflake_variations.png"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="$(DVSeasonsRuntimeResources)\Textures\winter_ballast_balanced.png"
-          Link="Textures\winter_ballast_balanced.png"
+    <None Include="$(DVSeasonsRuntimeResources)\Textures\autumn_leaf_atlas.png"
+          Link="Textures\autumn_leaf_atlas.png"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="$(DVSeasonsRuntimeResources)\Textures\Seasonal\**\*.png"
-          Link="Textures\Seasonal\%(RecursiveDir)%(Filename)%(Extension)"
+    <None Include="$(DVSeasonsRuntimeResources)\Overrides\README.txt"
+          Link="Overrides\README.txt"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="$(DVSeasonsRuntimeResources)\Audio\**\*.wav"
+    <None Include="$(DVSeasonsRuntimeResources)\Audio\**\*.wav;$(DVSeasonsRuntimeResources)\Audio\**\*.ogg;$(DVSeasonsRuntimeResources)\Audio\**\*.mp3"
           Link="Audio\%(RecursiveDir)%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
@@ -83,7 +97,8 @@
       <DistributionFiles Include="$(MSBuildProjectDirectory)\..\DVSeasons.MP\bin\$(Configuration)\DVSeasons.Multiplayer.dll" />
       <DistributionFiles Include="$(MSBuildProjectDirectory)\..\DVSeasons.MP\bin\$(Configuration)\DVSeasons.Multiplayer.pdb" Condition="Exists('$(MSBuildProjectDirectory)\..\DVSeasons.MP\bin\$(Configuration)\DVSeasons.Multiplayer.pdb')" />
       <AssetBundleFiles Include="$(TargetDir)AssetBundles\*" />
-      <TextureFiles Include="$(TargetDir)Textures\**\*" />
+      <TextureFiles Include="$(TargetDir)Textures\snowflake_realistic.png;$(TargetDir)Textures\snowflake_variations.png;$(TargetDir)Textures\autumn_leaf_atlas.png" />
+      <OverrideReadmeFiles Include="$(TargetDir)Overrides\README.txt" />
       <AudioFiles Include="$(TargetDir)Audio\**\*" />
       <LocalizationFiles Include="$(TargetDir)Localization\*.csv" />
     </ItemGroup>
@@ -96,6 +111,7 @@
     <Copy SourceFiles="@(TextureFiles)"
           DestinationFiles="@(TextureFiles->'$(DVSeasonsBuildOutputDir)\Textures\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(OverrideReadmeFiles)" DestinationFolder="$(DVSeasonsBuildOutputDir)\Overrides" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(AudioFiles)"
           DestinationFiles="@(AudioFiles->'$(DVSeasonsBuildOutputDir)\Audio\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />

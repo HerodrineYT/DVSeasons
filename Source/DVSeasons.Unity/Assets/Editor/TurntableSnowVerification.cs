@@ -7,6 +7,7 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.SceneManagement;
 
 namespace DVSeasons.AssetBundleBuild
 {
@@ -28,7 +29,7 @@ namespace DVSeasons.AssetBundleBuild
             string root = Path.GetFullPath(Path.Combine(Application.dataPath, "../.."));
             string modPath = Path.Combine(root, "artifacts/build/DVSeasons");
             string output = Path.Combine(root, "artifacts/verification/0.3.14-turntable");
-            string game = Environment.GetEnvironmentVariable("DVSEASONS_VERIFY_GAME");
+            string game = Environment.GetEnvironmentVariable("DVSEASONS_VERIFY_GAME")??"F:/Steam/steamapps/common/Derail Valley";
             ResolveEventHandler resolver = (sender, args) =>
             {
                 foreach (var directory in new[] { modPath, Path.Combine(game, "DerailValley_Data/Managed"),
@@ -44,12 +45,155 @@ namespace DVSeasons.AssetBundleBuild
             try
             {
                 Directory.CreateDirectory(output);
-                Verify(Assembly.LoadFrom(Path.Combine(modPath, "DVSeasons.dll")), modPath, game, output);
-                Debug.Log("TURNTABLE_SNOW_OK: exact native moving root, local asymmetric GPU snow mask, rotation without recapture, static pit exposure and destroyed-root cleanup.");
+                var mod=Assembly.LoadFrom(Path.Combine(modPath,"DVSeasons.dll"));
+                VerifyDiscovery(mod,game);
+                Verify(mod, modPath, game, output);
+                Debug.Log("TURNTABLE_SNOW_OK: event-driven budgeted discovery, inactive/late native sources, scene unload/reset; exact native moving root, local asymmetric GPU snow mask, rotation without recapture, static pit exposure and destroyed-root cleanup.");
             }
             catch (Exception exception) { Debug.LogException(exception); code = 1; }
             finally { AppDomain.CurrentDomain.AssemblyResolve -= resolver; }
             EditorApplication.Exit(code);
+        }
+
+        private static void VerifyDiscovery(Assembly mod,string game)
+        {
+            var mainScene=EditorSceneManager.NewScene(NewSceneSetup.EmptyScene,NewSceneMode.Single);
+            var temporaryScenes=new List<string>();
+            SaveTemporaryScene(mainScene,temporaryScenes);
+            var gameAssembly=Assembly.LoadFrom(Path.Combine(game,"DerailValley_Data/Managed/Assembly-CSharp.dll"));
+            var trackType=gameAssembly.GetType("TurntableRailTrack",true);
+            var railType=Assembly.LoadFrom(Path.Combine(game,"DerailValley_Data/Managed/DV.RailTrack.dll")).GetType("RailTrack",true);
+            var sourceType=mod.GetType("DVSeasons.Mod.TurntableSnowSource",true);
+            var giant=new GameObject("Sparse hierarchy with 8192 direct children");
+            for(int index=0;index<8192;index++)new GameObject("Sparse child "+index).transform.SetParent(giant.transform,false);
+            var initial=NativeTrack(trackType,railType,"Initially inactive turntable",giant.transform.GetChild(8191));
+            var initialRoot=new GameObject("Initially inactive moving bridge").transform;
+            initialRoot.SetParent(initial.transform,false);trackType.GetField("visuals").SetValue(initial,initialRoot);
+            var source=Activator.CreateInstance(sourceType,true);
+            var created=new List<GameObject>();
+            Scene streamed=default(Scene),abandoned=default(Scene);
+            try
+            {
+                Roots(source);
+                Require(Count(source,"LastStepVisitedCount")<=192 && Count(source,"PendingSceneCount")>0,
+                    "Large scene discovery exceeded its node budget or completed synchronously");
+                // A root with thousands of children owns one cursor; entering
+                // that root must never enqueue all descendants at once.
+                int queued=0;
+                foreach(DictionaryEntry scene in (IDictionary)Get(source,"scenes"))
+                    queued+=((ICollection)Get(scene.Value,"Children")).Count;
+                Require(queued<10,"One scene step enqueued an entire wide hierarchy: "+queued);
+                DrainDiscovery(source);
+                Require(Roots(source).Contains(initialRoot),"Initial scene scan missed inactive native turntable");
+                int snapshots=Count(source,"SceneSnapshotCount"),nodes=Count(source,"VisitedNodeCount");
+                for(int frame=0;frame<1200;frame++)Roots(source);
+                Require(Count(source,"SceneSnapshotCount")==snapshots && Count(source,"VisitedNodeCount")==nodes,
+                    "Completed scene was repeatedly scanned without a lifecycle event");
+
+                // Component discovery and bridge availability are independent.
+                // Native Init is invoked directly: EditMode does not promise
+                // Unity Awake dispatch for ordinary game MonoBehaviours.
+                var late=NativeTrack(trackType,railType,"Late native turntable",null);created.Add(late.gameObject);
+                railType.GetMethod("Init",All).Invoke(late.GetComponent(railType),null);
+                Require(((IDictionary)Get(source,"tracks")).Count==2,"Native RailTrack.Init hook missed late track");
+                var lateRoot=new GameObject("Bridge assigned after track Init").transform;lateRoot.SetParent(late.transform,false);
+                trackType.GetField("visuals").SetValue(late,lateRoot);
+                Require(Roots(source).Contains(lateRoot),"Late visuals assignment required a scene rescan");
+                var replacement=new GameObject("Replacement moving bridge").transform;replacement.SetParent(late.transform,false);
+                trackType.GetField("visuals").SetValue(late,replacement);
+                Require(Roots(source).Contains(replacement) && !Roots(source).Contains(lateRoot),"Visuals replacement retained stale root");
+                UnityEngine.Object.DestroyImmediate(replacement.gameObject);
+                Require(!Roots(source).Contains(replacement),"Destroyed visuals retained cached root");
+
+                var used=NativeTrack(trackType,railType,"Late independently attached track",null);created.Add(used.gameObject);
+                var usedRoot=new GameObject("Late rotated bridge").transform;usedRoot.SetParent(used.transform,false);
+                trackType.GetField("visuals").SetValue(used,usedRoot);
+                // Equal current/target angles return before native curve access,
+                // but the real rotation method's prefix must discover the track.
+                trackType.GetMethod("RotateToTargetRotation",All).Invoke(used,new object[]{false});
+                Require(Roots(source).Contains(usedRoot),"Native rotation hook missed a late independently attached track");
+                Require(Count(source,"SceneSnapshotCount")==snapshots,"Native initialization caused a global scene snapshot");
+
+                streamed=EditorSceneManager.NewScene(NewSceneSetup.EmptyScene,NewSceneMode.Additive);
+                SaveTemporaryScene(streamed,temporaryScenes);
+                var streamedTrack=NativeTrack(trackType,railType,"Streamed inactive native track",null);
+                SceneManager.MoveGameObjectToScene(streamedTrack.gameObject,streamed);
+                var streamedRoot=new GameObject("Streamed bridge").transform;streamedRoot.SetParent(streamedTrack.transform,false);
+                trackType.GetField("visuals").SetValue(streamedTrack,streamedRoot);
+                Call(source,"OnSceneLoaded",streamed,LoadSceneMode.Additive);
+                Call(source,"OnSceneLoaded",streamed,LoadSceneMode.Additive);
+                DrainDiscovery(source);
+                Require(Roots(source).Contains(streamedRoot),"Newly loaded scene missed inactive native source");
+                Require(Count(source,"SceneSnapshotCount")==snapshots+1 && Count(source,"VisitedNodeCount")<nodes+20,
+                    "Loading a tiny new scene restarted previously scanned large scenes");
+                // Moved objects belong to their present scene, not the scene in
+                // which discovery first encountered them.
+                SceneManager.MoveGameObjectToScene(streamedTrack.gameObject,mainScene);
+                Call(source,"OnSceneUnloaded",streamed);
+                Require(Roots(source).Contains(streamedRoot),"Unloading former scene removed a track moved to another scene");
+                created.Add(streamedTrack.gameObject);EditorSceneManager.CloseScene(streamed,true);streamed=default(Scene);
+
+                abandoned=EditorSceneManager.NewScene(NewSceneSetup.EmptyScene,NewSceneMode.Additive);
+                SaveTemporaryScene(abandoned,temporaryScenes);
+                var unloaded=NativeTrack(trackType,railType,"Unloaded before scan completes",null);
+                SceneManager.MoveGameObjectToScene(unloaded.gameObject,abandoned);
+                for(int index=0;index<1024;index++)new GameObject("Pending subtree "+index).transform.SetParent(unloaded.transform,false);
+                Call(source,"OnSceneLoaded",abandoned,LoadSceneMode.Additive);Roots(source);
+                Require(Count(source,"PendingSceneCount")>0,"Unload fixture did not retain pending traversal");
+                Call(source,"OnSceneUnloaded",abandoned);EditorSceneManager.CloseScene(abandoned,true);abandoned=default(Scene);
+                DrainDiscovery(source);
+                foreach(DictionaryEntry scene in (IDictionary)Get(source,"scenes"))
+                    Require(((ICollection)Get(scene.Value,"Roots")).Count==0 && ((ICollection)Get(scene.Value,"Children")).Count==0,
+                        "Completed/unloaded scene retained GameObject or child cursor references");
+
+                ((IDisposable)source).Dispose();
+                Require(Roots(source).Count==0 && ((IDictionary)Get(source,"tracks")).Count==0 &&
+                    ((IDictionary)Get(source,"scenes")).Count==0 && Count(source,"PendingSceneCount")==0,
+                    "Disposed turntable source retained scene or native object references");
+                var reset=Activator.CreateInstance(sourceType,true);
+                try {DrainDiscovery(reset);Require(Roots(reset).Contains(initialRoot),"Recreated source failed to take an initial loaded-scene snapshot");}
+                finally {((IDisposable)reset).Dispose();}
+                Debug.Log("TURNTABLE_DISCOVERY_OK: 8192-child scene bounded <=192 nodes/step; no idle rescans across 1200 calls; inactive initial/streamed tracks; actual native Init/Rotate hooks; late/replaced/destroyed visuals; one new-scene snapshot; moved/unloaded pending scenes; dispose/recreate cleanup.");
+            }
+            finally
+            {
+                ((IDisposable)source).Dispose();
+                if(streamed.IsValid() && streamed.isLoaded)EditorSceneManager.CloseScene(streamed,true);
+                if(abandoned.IsValid() && abandoned.isLoaded)EditorSceneManager.CloseScene(abandoned,true);
+                foreach(var item in created)if(item!=null)UnityEngine.Object.DestroyImmediate(item);
+                UnityEngine.Object.DestroyImmediate(giant);
+                // The initial scene must also be closed before its asset is
+                // removed. DeleteAsset removes only our exact scene/meta pair.
+                EditorSceneManager.NewScene(NewSceneSetup.EmptyScene,NewSceneMode.Single);
+                foreach(var path in temporaryScenes)AssetDatabase.DeleteAsset(path);
+            }
+        }
+
+        private static void SaveTemporaryScene(Scene scene,List<string> created)
+        {
+            string path;
+            do {path="Assets/Editor/__TurntableDiscovery_"+Guid.NewGuid().ToString("N")+".unity";}
+            while(File.Exists(path) || File.Exists(path+".meta"));
+            Require(EditorSceneManager.SaveScene(scene,path),"Unable to save temporary turntable fixture scene: "+path);
+            created.Add(path);
+        }
+
+        private static Component NativeTrack(Type trackType,Type railType,string name,Transform parent)
+        {
+            var item=new GameObject(name);item.SetActive(false);
+            if(parent!=null)item.transform.SetParent(parent,false);
+            var track=item.AddComponent(trackType);
+            var rail=item.GetComponent(railType)??item.AddComponent(railType);
+            railType.GetField("initialized",All).SetValue(rail,true);
+            return track;
+        }
+        private static List<Transform> Roots(object source)
+        {return new List<Transform>((IEnumerable<Transform>)Call(source,"GetRoots"));}
+        private static void DrainDiscovery(object source)
+        {
+            for(int step=0;step<20000 && Count(source,"PendingSceneCount")>0;step++)
+            {Roots(source);Require(Count(source,"LastStepVisitedCount")<=192,"Scene walk exceeded 192 nodes in one step");}
+            Require(Count(source,"PendingSceneCount")==0,"Turntable scene scan did not finish");
         }
 
         private static void Verify(Assembly mod, string modPath, string game, string output)
@@ -96,6 +240,7 @@ namespace DVSeasons.AssetBundleBuild
             var source = Activator.CreateInstance(mod.GetType("DVSeasons.Mod.TurntableSnowSource", true), true);
             Func<IEnumerable<Transform>> discover = () => (IEnumerable<Transform>)Call(source, "GetRoots");
             var discovered = new List<Transform>(discover());
+            for(var step=0;step<32 && discovered.Count==0;step++) discovered=new List<Transform>(discover());
             Require(discovered.Count == 1 && discovered[0] == visuals,
                 "Native turntable discovery did not select exactly TurntableRailTrack.visuals");
             var repositoryType = mod.GetType("DVSeasons.Mod.SeasonAssetBundleRepository", true);

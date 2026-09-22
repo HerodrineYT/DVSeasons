@@ -46,7 +46,7 @@ namespace DVSeasons.Mod
                 try
                 {
                     // Do not overwrite a request made by another owner while the
-                    // synchronous GPU readback was in progress. In normal use the
+                    // GPU readback was in progress. In normal use the
                     // value is still ours; the comparison makes cleanup safe when
                     // a scene unload or another streaming policy races this lease.
                     if (texture.requestedMipmapLevel == requestedLevel)
@@ -106,14 +106,15 @@ namespace DVSeasons.Mod
                 if (texture.requestedMipmapLevel != requestedLevel)
                     texture.requestedMipmapLevel = requestedLevel;
 
-                // This is Unity's completion signal for the exact requested mip;
-                // loadedMipmapLevel alone can describe a previous request while a
-                // newer stream operation is still pending.
-                if (!texture.IsRequestedMipmapLevelLoaded()) return false;
-                // A memory budget or an importer minimum can leave a coarser mip
-                // resident while Unity reports the request as complete. It is not
-                // sufficient for our target-sized readback, so keep polling until
-                // the loaded level is at least as detailed as the requested one.
+                // We need this mip OR a more detailed resident mip. Unity 2019 can
+                // keep mip 0 loaded (e.g. streamingTextureForceLoadAll) and report
+                // IsRequestedMipmapLevelLoaded == false forever for a request for
+                // mip 1/2. Waiting for that exact-match signal prevents seasonal
+                // textures from ever initializing even though their pixels exist.
+                // loadedMipmapLevel describes actual residency. Keep our request
+                // held until the GPU copy completes; a pending transition to this
+                // requested level cannot evict detail needed by that copy.
+                // Unknown or coarser resident levels must still wait.
                 var loadedLevel = texture.loadedMipmapLevel;
                 if (loadedLevel < 0 || loadedLevel > requestedLevel) return false;
                 pendingRequests.Remove(textureId);

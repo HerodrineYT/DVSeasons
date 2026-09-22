@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Reflection;
+using UnityEditor;
 using UnityEngine;
 
 namespace DVSeasons.AssetBundleBuild
@@ -8,7 +9,45 @@ namespace DVSeasons.AssetBundleBuild
     // Exercises the actual compiled, chunked runtime compositor without starting DV.
     public static class SurfaceSnowVerification
     {
+        static object pendingRepository;
+        static Type repositoryType;
+        static double deadline;
+
         public static void Verify()
+        {
+            var root=Path.GetFullPath(Path.Combine(Application.dataPath,"../.."));
+            var modPath=Path.Combine(root,"artifacts/build/DVSeasons");
+            var assembly=Assembly.LoadFrom(Path.Combine(modPath,"DVSeasons.dll"));
+            repositoryType=assembly.GetType("DVSeasons.Mod.SeasonAssetBundleRepository",true);
+            pendingRepository=Activator.CreateInstance(repositoryType,new object[]{modPath});
+            // Match SeasonVisualController.PrepareStartup: authored profiles may
+            // only be requested after all independently loaded bundles are ready.
+            repositoryType.GetMethod("BeginLoad").Invoke(pendingRepository,null);
+            deadline=EditorApplication.timeSinceStartup+90;
+            EditorApplication.update+=AwaitBundle;
+        }
+
+        static void AwaitBundle()
+        {
+            try
+            {
+                EditorApplication.QueuePlayerLoopUpdate();
+                if(EditorApplication.timeSinceStartup>deadline)throw new Exception("Surface fixture bundle loading timed out");
+                if(!(bool)repositoryType.GetProperty("IsLoadFinished").GetValue(pendingRepository,null))return;
+                EditorApplication.update-=AwaitBundle;
+                var repository=pendingRepository;pendingRepository=null;
+                VerifyReady(repository);
+                EditorApplication.Exit(0);
+            }
+            catch(Exception error)
+            {
+                Debug.LogException(error);EditorApplication.update-=AwaitBundle;
+                if(pendingRepository!=null)((IDisposable)pendingRepository).Dispose();
+                pendingRepository=null;EditorApplication.Exit(1);
+            }
+        }
+
+        private static void VerifyReady(object repository)
         {
             var root = Path.GetFullPath(Path.Combine(Application.dataPath, "../.."));
             var modPath = Path.Combine(root, "artifacts/build/DVSeasons");
@@ -23,10 +62,9 @@ namespace DVSeasons.AssetBundleBuild
             VerifyVegetationClassification(controllerType, categoryType,
                 "T_beech_forest_stumps_01_BC_SM", "Bark");
             VerifyVegetationClassification(controllerType, categoryType,
-                "T_beech_atlas_BC v2", "Foliage");
+                "T_beech_atlas_BC v2 beech leaves", "Foliage");
             if (Shader.Find("Sprites/Default") == null)
                 throw new Exception("Sprites/Default shader required by physical autumn leaves is unavailable.");
-            var repository = Activator.CreateInstance(repositoryType, new object[] { modPath });
             var sheet = new Texture2D(512, 256, TextureFormat.RGBA32, false);
             try
             {
@@ -56,8 +94,9 @@ namespace DVSeasons.AssetBundleBuild
                             do
                             {
                                 setType.GetMethod("UpdateChunk").Invoke(set, new[] { state, (object)1f, step, 257 });
+                                UnityEngine.Rendering.AsyncGPUReadback.WaitAllRequests(); // Test-only completion; runtime never waits.
                                 if (++calls > 1000) throw new Exception("Snow chunk update failed to finish.");
-                            } while ((bool)setType.GetProperty("HasPendingUpdate").GetValue(set, null));
+                            } while ((bool)setType.GetMethod("NeedsUpdate").Invoke(set,new object[]{step}));
                             var output = (Texture2D)setType.GetProperty("Output").GetValue(set, null);
                             if (output == null) throw new Exception("Snow output missing.");
                             var pixels = output.GetPixels32();
@@ -74,7 +113,7 @@ namespace DVSeasons.AssetBundleBuild
                                 foreach (var pixel in pixels) brightness += pixel.r;
                                 brightness /= pixels.Length;
                                 if (index > 0 && brightness < previousBrightness + 15)
-                                    throw new Exception("Snow stages did not visibly increase coverage.");
+                                    throw new Exception("Snow stages did not visibly increase coverage for "+name+" at "+amounts[index]+": "+previousBrightness+" -> "+brightness);
                                 if (index == 3 && brightness < 185)
                                     throw new Exception("Full winter surface remains too dark.");
                                 previousBrightness = brightness;

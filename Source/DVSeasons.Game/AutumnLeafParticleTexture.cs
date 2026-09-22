@@ -1,9 +1,58 @@
+using System;
+using System.IO;
 using UnityEngine;
 
 namespace DVSeasons.Mod
 {
     internal static class AutumnLeafParticleTexture
     {
+        internal const string AtlasFileName = "autumn_leaf_atlas.png";
+        internal const int AtlasSize = 1024;
+
+        public static Texture2D LoadOrCreate(string modPath, string name)
+        {
+            Texture2D texture;
+            return TryLoad(modPath, name, false, out texture) ? texture : Create(name);
+        }
+
+        // The authored pixels are baked once by verify_autumn_leaf_atlas.ps1.
+        // Runtime only decodes that small ready atlas, with no procedural pixel
+        // loop or GPU readback. The owning controller retains it across seasons.
+        internal static bool TryLoad(string modPath, string name, bool keepReadable, out Texture2D texture)
+        {
+            texture = null;
+            if (string.IsNullOrEmpty(modPath)) return false;
+            var path = Path.Combine(modPath, "Textures", AtlasFileName);
+            if (!File.Exists(path)) return false;
+            Texture2D loaded = null;
+            try
+            {
+                loaded = new Texture2D(2, 2, TextureFormat.RGBA32, true, false)
+                {
+                    name = name,
+                    filterMode = FilterMode.Trilinear,
+                    wrapMode = TextureWrapMode.Clamp,
+                    hideFlags = HideFlags.HideAndDontSave
+                };
+                if (!ImageConversion.LoadImage(loaded, File.ReadAllBytes(path), !keepReadable) ||
+                    loaded.width != AtlasSize || loaded.height != AtlasSize)
+                    throw new InvalidDataException("The leaf atlas must be a 1024 by 1024 RGBA image.");
+                texture = loaded;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("[DVSeasons] Cached leaf atlas could not be loaded; using the procedural fallback: " +
+                    exception.Message);
+                if (loaded != null)
+                {
+                    if (Application.isPlaying) UnityEngine.Object.Destroy(loaded);
+                    else UnityEngine.Object.DestroyImmediate(loaded);
+                }
+                return false;
+            }
+        }
+
         // Columns: maple, oak, birch, beech. Rows: gold, russet, brown, olive.
         private static readonly Vector2[] Maple =
         {
@@ -32,7 +81,11 @@ namespace DVSeasons.Mod
             new Color(.59f,.42f,.23f), new Color(.65f,.55f,.23f)
         };
 
-        public static Texture2D Create(string name)
+        public static Texture2D Create(string name) { return CreateCore(name, false); }
+
+        internal static Texture2D CreateReadable(string name) { return CreateCore(name, true); }
+
+        private static Texture2D CreateCore(string name, bool keepReadable)
         {
             const int tile = 256, width = tile * 4, height = tile * 4;
             // Authored in sRGB, with mipmaps for the small leaves in the distance.
@@ -79,7 +132,7 @@ namespace DVSeasons.Mod
                 }
             }
             texture.SetPixels32(pixels);
-            texture.Apply(true, true);
+            texture.Apply(true, !keepReadable);
             return texture;
         }
 

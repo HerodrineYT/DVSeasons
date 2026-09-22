@@ -59,6 +59,7 @@ namespace DVSeasons.Mod
                 DisableWinterThunder = settings.DisableWinterThunder,
                 RespectExternalWetnessOverride = settings.RespectExternalWetnessOverride
             };
+            var blizzard = SuspendBlizzard();
             var wetness = SuspendWetness(driver);
             var thunder = SuspendThunder(driver);
             try
@@ -71,7 +72,7 @@ namespace DVSeasons.Mod
                     state.Values[i] = slot.OverriddenValue;
                 }
             }
-            finally { thunder?.Restore(); wetness?.Restore(); }
+            finally { thunder?.Restore(); wetness?.Restore(); blizzard?.Dispose(); }
             return state;
         }
 
@@ -102,6 +103,7 @@ namespace DVSeasons.Mod
                 driver.manager.todSky == null) return;
             // Release our own modifiers before replacing the manual input. They
             // are reapplied by the runtime with the host's gameplay settings.
+            ApplyBlizzard(false);
             ReleaseWetnessOverride();
             ReleaseThunderOverride();
             bool refresh = false;

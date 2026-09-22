@@ -25,12 +25,20 @@ namespace DVSeasons.Mod
             public bool ColdAttempt, De6, WasRunning;
             public float Held, Required;
             public float BlockTemperature = float.NaN;
-            public Port Primer;
+            public Port Primer, Throttle;
+            public TrainCar Car;
+            public bool Vanilla, Cranking;
+            public float Remaining;
             public readonly ColdIdleStabilization Idle = new ColdIdleStabilization();
         }
         private ConditionalWeakTable<SimComponent, StartState> starts = new ConditionalWeakTable<SimComponent, StartState>();
         private float ambient = 25, nextScan;
         private bool installed, failed;
+        public bool IgnoreVanillaColdStarts;
+        private readonly Dictionary<TrainCar,List<SimComponent>> engines=new Dictionary<TrainCar,List<SimComponent>>();
+        private readonly Dictionary<TrainCar,SimulationFlow> engineFlows=new Dictionary<TrainCar,SimulationFlow>();
+        private readonly List<TrainCar> removedCars=new List<TrainCar>();
+        private readonly List<ColdStartHintState> hintSnapshot=new List<ColdStartHintState>();
 
         public void Apply(float temperature)
         {
@@ -44,7 +52,7 @@ namespace DVSeasons.Mod
                     foreach (var type in new[] { typeof(DieselEnginePowerSource), typeof(DieselEngineDirectDrive) })
                         harmony.Patch(AccessTools.Method(type, "Tick"),
                             prefix: new HarmonyMethod(typeof(ColdPowertrainController), nameof(TimedStarter)),
-                            postfix: new HarmonyMethod(typeof(ColdPowertrainController), nameof(EngineWarmth)));
+                            postfix: new HarmonyMethod(typeof(ColdPowertrainController), nameof(TimedStarterState)));
                     harmony.Patch(AccessTools.Method(typeof(DieselEngineDirect), "Tick"),
                         postfix: new HarmonyMethod(typeof(ColdPowertrainController), nameof(StabilizeDe6)));
                     harmony.Patch(AccessTools.Method(typeof(DieselEngineDirect), "SimulateTorque"),
@@ -64,26 +72,89 @@ namespace DVSeasons.Mod
             }
             if (Time.realtimeSinceStartup < nextScan) return;
             nextScan = Time.realtimeSinceStartup + 2;
+            removedCars.Clear();foreach(var car in engines.Keys)if(car==null)removedCars.Add(car);
+            foreach(var car in removedCars){engines.Remove(car);engineFlows.Remove(car);}
             foreach (var car in RailSnowGameSource.GetCars())
             {
-                if (car == null || car.SimController == null) continue;
+                if (car == null || !car.IsLoco) continue;
+                bool batteryCar = car.carType == TrainCarType.LocoMicroshunter;
+                if (car.SimController == null) continue;
                 var flow = car.SimController.simFlow;
                 if (flow == null) continue;
+                RegisterEngines(car);
+                if(!batteryCar)continue;
                 foreach (var component in flow.OrderedSimComps)
                 {
                     var SimBattery = component as SimBattery;
                     Pack pack;
-                    if (SimBattery != null && car.carType == TrainCarType.LocoMicroshunter && !packs.TryGetValue(SimBattery, out pack))
+                    if (SimBattery != null && batteryCar && !packs.TryGetValue(SimBattery, out pack))
                         packs.Add(SimBattery, new Pack { Temperature = ambient });
-                    if (car.carType == TrainCarType.LocoDiesel && component is DieselEngineDirect)
+                }
+            }
+        }
+
+        private void RegisterEngines(TrainCar car)
+        {
+            if(car==null || !car.IsLoco)return;
+            var flow=car!=null && car.SimController!=null?car.SimController.simFlow:null;
+            if(flow==null)return;
+            SimulationFlow known;if(engineFlows.TryGetValue(car,out known) && ReferenceEquals(known,flow))return;
+            engineFlows[car]=flow;
+            List<SimComponent> list;
+            if(!engines.TryGetValue(car,out list)){list=new List<SimComponent>();engines.Add(car,list);}else list.Clear();
+            bool vanilla=CabEngineHeating.IsStockType(car.carType) && !CabEngineHeating.IsCustomLocomotive(car);
+            foreach(var engine in flow.OrderedSimComps)
+            {
+                if(!(engine is DieselEnginePowerSource) && !(engine is DieselEngineDirectDrive) && !(engine is DieselEngineDirect))continue;
+                var state=starts.GetOrCreateValue(engine);state.Car=car;state.Vanilla=vanilla;list.Add(engine);
+                if(vanilla && car.carType==TrainCarType.LocoDiesel && engine is DieselEngineDirect)
+                {
+                    state.De6=true;
+                    state.Primer=state.Throttle=null;
+                    foreach(var port in flow.AllPorts)
                     {
-                        var start = starts.GetOrCreateValue(component);
-                        start.De6 = true;
-                        foreach (var port in flow.AllPorts)
-                            if (port.id == "primerThrottle.EXT_IN") { start.Primer = port; break; }
+                        if(port.id=="primerThrottle.EXT_IN")state.Primer=port;
+                        else if(port.id=="throttle.EXT_IN")state.Throttle=port;
                     }
                 }
             }
+        }
+        private bool Bypassed(SimComponent engine,StartState state)
+        {
+            if(!IgnoreVanillaColdStarts)return false;
+            // A new engine may start before the next periodic fleet refresh.
+            if(state.Car==null)foreach(var car in RailSnowGameSource.GetCars())
+            {
+                RegisterEngines(car);if(state.Car!=null)break;
+            }
+            return state.Vanilla;
+        }
+        private ColdStartHintState Hint(SimComponent engine,StartState state)
+        {
+            if(state.Car==null || Bypassed(engine,state))return default(ColdStartHintState);
+            return new ColdStartHintState{CarId=state.Car.CarGUID,De6=state.De6,
+                Stage=state.Idle.Active?ColdStartHintStage.Primer:state.Cranking?ColdStartHintStage.Starter:ColdStartHintStage.None,
+                RemainingSeconds=state.Idle.Active?state.Idle.RemainingSeconds:Mathf.Clamp(state.Remaining,0,60)};
+        }
+        public ColdStartHintState GetHint(TrainCar car)
+        {
+            List<SimComponent> list;
+            if(car!=null && !engines.ContainsKey(car))RegisterEngines(car);
+            if(car==null || !engines.TryGetValue(car,out list))return default(ColdStartHintState);
+            foreach(var engine in list)
+            {var hint=Hint(engine,starts.GetOrCreateValue(engine));if(hint.Stage!=ColdStartHintStage.None)return hint;}
+            return default(ColdStartHintState);
+        }
+        public ColdStartHintState[] CaptureHints()
+        {
+            hintSnapshot.Clear();
+            foreach(var pair in engines)
+            {
+                var hint=GetHint(pair.Key);
+                if(hint.Stage!=ColdStartHintStage.None && hint.IsValid())hintSnapshot.Add(hint);
+                if(hintSnapshot.Count>=VehicleThermalNetworkState.MaxVehicles)break;
+            }
+            return hintSnapshot.Count==0?ColdStartHintState.Empty:hintSnapshot.ToArray();
         }
 
         private void Patch(Type type, string method, string transpiler)
@@ -114,17 +185,24 @@ namespace DVSeasons.Mod
             ref bool ___ignitionRequested, ref float ___ignitionDelay, ref float ___ignitionRpmBuildUpTime,
             ref float ___engineRpm)
         {
-            if (active == null || ___engineOn || ___ignitionRequested) return;
+            if (active == null || ___engineOn) return;
             var power = __instance as DieselEnginePowerSource;
             var drive = __instance as DieselEngineDirectDrive;
             var ignition = power != null ? power.ignitionExtIn : drive.ignitionExtIn;
             var fuse = power != null ? power.engineStarterFuseRef : drive.engineStarterFuseRef;
             if (!fuse.State || ignition.Value < .75f) return;
-            var temperature = EngineTemperature(__instance, power != null ? power.temperature : drive.temperature);
             var state = active.starts.GetOrCreateValue(__instance);
+            float native = power != null ? power.ignitionTime : drive.ignitionMaxTime;
+            if(active.Bypassed(__instance,state))
+            {
+                if(state.ColdAttempt && ___ignitionRequested)
+                {___ignitionDelay=Mathf.Min(___ignitionDelay,native*.4f);___ignitionRpmBuildUpTime=Mathf.Min(___ignitionRpmBuildUpTime,native*.6f);}
+                state.ColdAttempt=false;return;
+            }
+            if(___ignitionRequested)return;
+            var temperature = EngineTemperature(__instance, power != null ? power.temperature : drive.temperature);
             state.ColdAttempt = active.ambient < 0 && temperature < 40;
             if (!state.ColdAttempt) return;
-            float native = power != null ? power.ignitionTime : drive.ignitionMaxTime;
             float hold = ColdPowertrainProfile.StarterHoldSeconds(active.ambient, temperature, native);
             // Set only the new attempt's cranking parameters. Native fuel, fuse,
             // health, cancellation and engine-on logic still runs in Tick.
@@ -134,13 +212,27 @@ namespace DVSeasons.Mod
             ___ignitionRpmBuildUpTime = hold * .6f;
         }
 
+        private static void TimedStarterState(SimComponent __instance,float delta,bool ___engineOn,
+            bool ___ignitionRequested,float ___ignitionDelay,float ___ignitionRpmBuildUpTime,float ___engineRpm)
+        {
+            if(active==null)return;
+            var state=active.starts.GetOrCreateValue(__instance);
+            var power=__instance as DieselEnginePowerSource;var drive=__instance as DieselEngineDirectDrive;
+            float idle=power!=null?power.engineRpmIdle:drive.engineRpmIdle;
+            state.Cranking=state.ColdAttempt && ___ignitionRequested && !___engineOn && !active.Bypassed(__instance,state);
+            state.Remaining=state.Cranking?Mathf.Max(0,___ignitionDelay)+___ignitionRpmBuildUpTime*Mathf.Clamp01(1-___engineRpm/Mathf.Max(.01f,idle)):0;
+            if(!___ignitionRequested || ___engineOn)state.ColdAttempt=false;
+            EngineWarmth(__instance,delta,___engineOn);
+        }
+
         private static void DirectStarter(DieselEngineDirect __instance, float delta, bool ___engineOn,
             float ___engineRpmMin)
         {
             if (active == null) return;
             var state = active.starts.GetOrCreateValue(__instance);
+            if(active.Bypassed(__instance,state)){state.ColdAttempt=state.Cranking=false;state.Held=0;return;}
             bool cranking = !___engineOn && __instance.engineStarterFuseRef.State && __instance.ignitionExtIn.Value > 0;
-            if (!cranking) { state.Held = 0; return; }
+            if (!cranking) { state.Held = 0;state.Cranking=false; return; }
             if (state.Held <= 0)
             {
                 float temperature = EngineTemperature(__instance, __instance.temperature);
@@ -149,6 +241,7 @@ namespace DVSeasons.Mod
             }
             if (!state.ColdAttempt) return;
             state.Held += Mathf.Max(0, delta);
+            state.Cranking=true;state.Remaining=Mathf.Max(0,state.Required-state.Held);
             if (state.Held + .0001f < state.Required)
                 __instance.engineRpm.Value = Mathf.Min(__instance.engineRpm.Value,
                     ___engineRpmMin * Mathf.Lerp(.2f, .95f, state.Held / state.Required));
@@ -160,14 +253,18 @@ namespace DVSeasons.Mod
         {
             if (active == null) return;
             var state = active.starts.GetOrCreateValue(__instance);
-            if (___engineOn && !state.WasRunning && state.ColdAttempt && state.De6 && state.Primer != null)
+            if(active.Bypassed(__instance,state))
+            {state.Idle.Reset();state.ColdAttempt=state.Cranking=false;state.WasRunning=___engineOn;EngineWarmth(__instance,delta,___engineOn);return;}
+            if (___engineOn && !state.WasRunning && state.ColdAttempt && state.De6 && (state.Primer != null || state.Throttle != null))
             { state.Idle.Begin(); state.ColdAttempt = false; }
-            else if (___engineOn && state.Idle.Advance(delta, state.Primer != null && state.Primer.Value > .1f))
+            else if (___engineOn && state.Idle.Advance(delta,
+                state.Primer != null && state.Primer.Value > .1f || state.Throttle != null && state.Throttle.Value >= .9999f))
             {
                 ___engineOn = false; __instance.engineOnReadOut.Value = 0;
-                Debug.Log("[DVSeasons] Cold DE6 stalled: open the engine-room throttle within 2 seconds and hold it for 3 seconds.");
+                Debug.Log("[DVSeasons] Cold DE6 stalled: within 5 seconds, open the engine-room throttle or set the cab throttle to maximum; hold either for 3 seconds.");
             }
             if (!___engineOn) state.Idle.Reset();
+            if(___engineOn)state.Cranking=false;
             state.WasRunning = ___engineOn;
             EngineWarmth(__instance, delta, ___engineOn);
         }
@@ -225,6 +322,7 @@ namespace DVSeasons.Mod
             installed = false; nextScan = 0;
             packs = new ConditionalWeakTable<SimBattery, Pack>();
             starts = new ConditionalWeakTable<SimComponent, StartState>();
+            engines.Clear();engineFlows.Clear();removedCars.Clear();hintSnapshot.Clear();
             if (active == this) active = null;
         }
         public void Dispose() { Reset(); }

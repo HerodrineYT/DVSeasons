@@ -56,7 +56,7 @@ namespace DVSeasons.Tests
                 expected.RespectExternalWetnessOverride = (flags & 16) != 0;
                 var state = Decode(Encode(Season(expected)));
                 Assert.True(state.IsValid());
-                Assert.Equal(9, state.Protocol);
+                Assert.Equal(SeasonNetworkState.CurrentProtocol, state.Protocol);
                 var actual = state.Weather;
                 Assert.True(actual.Available);
                 Assert.Equal(expected.Overrides, actual.Overrides);
@@ -147,8 +147,10 @@ namespace DVSeasons.Tests
         }
 
         [Theory]
-        [InlineData(8)]
+        [InlineData(9)]
         [InlineData(10)]
+        [InlineData(11)]
+        [InlineData(SeasonNetworkState.CurrentProtocol + 1)]
         public void MixedProtocolsAreRejectedWithoutReadingTheirPayload(int protocol)
         {
             using (var stream = new MemoryStream())

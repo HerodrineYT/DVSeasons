@@ -25,6 +25,15 @@ namespace DVSeasons.Mod
         private readonly ExposureMap distant = new ExposureMap();
         private readonly Vector3[] ambientDirections = { Vector3.up };
         private readonly Color[] ambientColors = new Color[1];
+        private readonly RenderTargetIdentifier[] snowTargets = {
+            new RenderTargetIdentifier(BuiltinRenderTextureType.GBuffer0),
+            new RenderTargetIdentifier(BuiltinRenderTextureType.GBuffer1),
+            new RenderTargetIdentifier(BuiltinRenderTextureType.CameraTarget)
+        };
+        private bool? materialHdr;
+        private readonly Matrix4x4[] inverseStereoVP = new Matrix4x4[2];
+        private readonly RenderTextureFormat ambientCopyFormat = SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.R8)
+            ? RenderTextureFormat.R8 : RenderTextureFormat.ARGB32;
         private struct TerrainCaptureState
         {
             public Terrain Terrain;
@@ -37,9 +46,19 @@ namespace DVSeasons.Mod
         public readonly RailSnowTracks RailTracks = new RailSnowTracks();
         public Action BeforeSnowRender;
         public float GlareReduction;
+        public void SetObjectLimit(int limit) { vehicles.ObjectLimiter.Limit = limit; }
+        public void SetVehicleSnowEnabled(bool enabled)
+        {
+            if(vehicles.VehicleSnowEnabled==enabled)return;
+            SnowRenderBenchmark.Cancel("vehicle snow setting changed");
+            vehicles.VehicleSnowEnabled=enabled;
+        }
+        public bool IsObjectSnowAllowed(Component source)
+        { return !IsActive || !vehicles.ObjectLimiter.Active || (source != null && vehicles.ObjectLimiter.IsSelected(source.transform)); }
         public void SetVehicleDiscovery(Func<IEnumerable<Component>> discovery) { vehicles.DiscoverVehicles=discovery; }
         public void SetMovingSurfaceDiscovery(Func<IEnumerable<Transform>> discovery) { vehicles.DiscoverMovingRoots=discovery; }
         public void SetVehicleSnowRemaining(Func<Component,float> remaining) {vehicles.SnowRemaining=remaining;}
+        public void SetVehicleSideSnow(Func<Component,Vector4> amount) {vehicles.SideSnowAmount=amount;}
         public void SetVehicleSaveIdentity(Func<Component,string> identity) {vehicles.StableVehicleId=identity;}
         public void SetNativeVehicleSnow(Func<Renderer,int,bool> hasTexture) {vehicles.HasNativeSnowTexture=hasTexture;}
         public void InvalidateGeometry() { near.GeometryDirty=far.GeometryDirty=distant.GeometryDirty=true; }
@@ -51,6 +70,7 @@ namespace DVSeasons.Mod
             var delta=offset-worldOffset;
             if(delta==Vector3.zero) return;
             ShiftExposure(near,delta); ShiftExposure(far,delta); ShiftExposure(distant,delta);
+            vehicles.ObjectLimiter.ShiftWorld(delta);
             worldOffset=offset;
         }
         private static void ShiftExposure(ExposureMap map,Vector3 delta)
@@ -77,6 +97,25 @@ namespace DVSeasons.Mod
         private static readonly int SpecularId = Shader.PropertyToID("_DVPSSpecular");
         private static readonly int NormalId = Shader.PropertyToID("_DVPSNormal");
         private static readonly int LightingId = Shader.PropertyToID("_DVPSLighting");
+        private static readonly int NoiseId = Shader.PropertyToID("_DVPSNoise");
+        private static readonly int NearHeightId = Shader.PropertyToID("_DVPSNearHeight");
+        private static readonly int FarHeightId = Shader.PropertyToID("_DVPSFarHeight");
+        private static readonly int DistantHeightId = Shader.PropertyToID("_DVPSDistantHeight");
+        private static readonly int NearAreaId = Shader.PropertyToID("_DVPSNearArea");
+        private static readonly int FarAreaId = Shader.PropertyToID("_DVPSFarArea");
+        private static readonly int DistantAreaId = Shader.PropertyToID("_DVPSDistantArea");
+        private static readonly int WorldOffsetId = Shader.PropertyToID("_DVPSWorldOffset");
+        private static readonly int HeightOffsetsId = Shader.PropertyToID("_DVPSHeightOffsets");
+        private static readonly int AmountId = Shader.PropertyToID("_DVPSAmount");
+        private static readonly int GlareReductionId = Shader.PropertyToID("_DVPSGlareReduction");
+        private static readonly int HdrId = Shader.PropertyToID("_DVPSHDR");
+        private static readonly int AmbientId = Shader.PropertyToID("_DVPSAmbient");
+        private static readonly int InverseVpId = Shader.PropertyToID("_DVPSInverseVP");
+        private static readonly int SrcBlendId = Shader.PropertyToID("_SnowSrcBlend");
+        private static readonly int DstBlendId = Shader.PropertyToID("_SnowDstBlend");
+        private static readonly int AlphaSrcBlendId = Shader.PropertyToID("_SnowAlphaSrcBlend");
+        private static readonly int AlphaDstBlendId = Shader.PropertyToID("_SnowAlphaDstBlend");
+        private static readonly int SpecAlphaDstBlendId = Shader.PropertyToID("_SnowSpecAlphaDstBlend");
         private Camera worldCamera;
         private Camera exposureCamera;
         private Shader exposureShader;
@@ -138,13 +177,15 @@ namespace DVSeasons.Mod
                 // UpdateExposure already refreshes them after actual relocation.
             }
             IsActive = true;
+            SnowRenderBenchmark.Ready(camera,amount,vehicles.ObjectLimiter.Limit);
             if (amount <= 0.001f) { commands.Clear(); return; }
             // Auxiliary cameras must finish before the world camera starts culling.
             // In 0.2.14 nested renders in onPreCull could disturb camera globals;
             // the cached inverse matrix also preceded camera shake/TAA updates.
             try
             {
-                vehicles.Update(camera);
+                vehicles.StaticGeometryChanged=InvalidateGeometry;
+                using(SnowPerformance.Measure("vehicle-discovery")) vehicles.Update(camera);
                 if(exposureExclusions.Update()) InvalidateGeometry();
                 // Geometry is static between weather changes. Camera relocation still
                 // maintains visibility; it does not accumulate snow.
@@ -158,7 +199,8 @@ namespace DVSeasons.Mod
                 if(far.Ready && ExposureCaptureCount==capturesBefore)
                     UpdateExposure(distant,Mathf.Max(2048f,Mathf.Ceil(camera.farClipPlane*2.5f/256f)*256f),240f);
                 if(near.Ready && far.Ready)
-                    vehicles.Accumulate(near.Texture,near.Area,near.HeightOffset,far.Texture,far.Area,far.HeightOffset,RailTracks.SnowClock);
+                    vehicles.Accumulate(near.Texture,near.Area,near.HeightOffset,far.Texture,far.Area,far.HeightOffset,RailTracks.SnowClock,
+                        distant.Ready?distant.Texture:null,distant.Area,distant.HeightOffset);
             }
             catch (Exception exception) { FailRender(exception); }
         }
@@ -171,9 +213,11 @@ namespace DVSeasons.Mod
             var shader = repository.LoadShader("ProceduralSnow");
             exposureShader = repository.LoadShader("SnowExposure");
             if (shader == null || exposureShader == null) return false;
+            exposureExclusions.SetExclusionShader(repository.LoadShader("SnowVehicle"));
             if(terrainExposureMaterial==null) terrainExposureMaterial=new Material(exposureShader) {hideFlags=HideFlags.HideAndDontSave};
             if(terrainExposureCommands==null) terrainExposureCommands=new CommandBuffer {name="DVSeasons terrain height capture"};
-            if (material == null) material = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
+            if (material == null)
+            { material = new Material(shader) { hideFlags = HideFlags.HideAndDontSave }; materialHdr=null; }
             if(noiseTexture==null)
             {
                 noiseTexture=SnowCoveragePattern.CreateTexture();
@@ -193,6 +237,7 @@ namespace DVSeasons.Mod
                 var owner = new GameObject("DVSeasons snow exposure") { hideFlags = HideFlags.HideAndDontSave };
                 exposureCamera = owner.AddComponent<Camera>();
                 exposureCamera.enabled = false;
+                exposureCamera.stereoTargetEye = StereoTargetEyeMask.None;
                 exposureCamera.orthographic = true;
                 exposureCamera.renderingPath = RenderingPath.Forward;
                 exposureCamera.clearFlags = CameraClearFlags.SolidColor;
@@ -212,10 +257,18 @@ namespace DVSeasons.Mod
         {
             if (renderingExposure || camera != worldCamera || commands == null) return;
             commands.Clear();
-            if (!IsActive || amount <= 0.001f || material == null || !near.Ready || !far.Ready) return;
+            if (!IsActive || amount <= 0.001f || material == null || !near.Ready || !far.Ready)
+            {SnowRenderBenchmark.Cancel("snow renderer not ready");return;}
+            SnowRenderBenchmark.BeforeRender(camera);
             try
             {
                 using(SnowPerformance.Measure("rail-traces")) BeforeSnowRender?.Invoke();
+                Color nativeAmbient;
+                if(RenderSettings.ambientMode==AmbientMode.Flat)nativeAmbient=RenderSettings.ambientLight;
+                else {var probe=RenderSettings.ambientProbe;probe.Evaluate(ambientDirections,ambientColors);nativeAmbient=ambientColors[0];}
+                vehicles.PrepareNativeSnow(SnowRenderBenchmark.SkipAll || SnowRenderBenchmark.SkipVehicles || SnowRenderBenchmark.SkipShading?0:amount,
+                    GlareReduction,noiseTexture,nativeAmbient);
+                if(SnowRenderBenchmark.SkipAll)return;
                 using(SnowPerformance.Measure("render-commands")) RecordCommands();
             }
             catch (Exception exception)
@@ -227,6 +280,7 @@ namespace DVSeasons.Mod
 
         private void FailRender(Exception exception)
         {
+            SnowRenderBenchmark.Cancel("render error");
             if (commands != null) commands.Clear(); IsActive=false;
             renderRetryAfter=Time.realtimeSinceStartup+5f;
             if (!failureLogged) { failureLogged=true; Debug.LogError("[DVSeasons] Procedural snow render failed: "+exception); }
@@ -318,62 +372,121 @@ namespace DVSeasons.Mod
         private void RecordCommands()
         {
             var camera = worldCamera;
-            var lightingTarget = camera.allowHDR ? BuiltinRenderTextureType.CameraTarget : BuiltinRenderTextureType.GBuffer3;
-            bool hdr=camera.allowHDR;
-            if(hdr) material.EnableKeyword("DVPS_FAST_HDR"); else material.DisableKeyword("DVPS_FAST_HDR");
-            material.SetInt("_SnowSrcBlend",(int)(hdr?BlendMode.SrcAlpha:BlendMode.One));
-            material.SetInt("_SnowDstBlend",(int)(hdr?BlendMode.OneMinusSrcAlpha:BlendMode.Zero));
-            material.SetInt("_SnowAlphaSrcBlend",(int)(hdr?BlendMode.Zero:BlendMode.One));
-            material.SetInt("_SnowAlphaDstBlend",(int)(hdr?BlendMode.One:BlendMode.Zero));
-            material.SetInt("_SnowSpecAlphaDstBlend",(int)(hdr?BlendMode.OneMinusSrcAlpha:BlendMode.Zero));
-            // HDR only needs the AO channel; native albedo/alpha are preserved by
-            // blending. A half-size AO copy avoids a full-resolution color copy.
-            commands.GetTemporaryRT(DiffuseId,hdr?Mathf.Max(1,camera.pixelWidth/2):-1,
-                hdr?Mathf.Max(1,camera.pixelHeight/2):-1,0,hdr?FilterMode.Bilinear:FilterMode.Point,
-                RenderTextureFormat.ARGB32,RenderTextureReadWrite.Linear);
-            commands.Blit(BuiltinRenderTextureType.GBuffer0,DiffuseId);
+            bool hdr;
+            // These four non-overlapping CPU scopes cover the entire command
+            // submission. The existing command-buffer samples measure GPU work.
+            using(SnowPerformance.Measure("snow-buffer-prep-record"))
+            {
+            hdr=camera.allowHDR;
+            commands.BeginSample("DVSeasons snow buffer preparation");
+            var lightingTarget = hdr ? BuiltinRenderTextureType.CameraTarget : BuiltinRenderTextureType.GBuffer3;
+            if(materialHdr!=hdr)
+            {
+                if(hdr) material.EnableKeyword("DVPS_FAST_HDR"); else material.DisableKeyword("DVPS_FAST_HDR");
+                material.SetInt(SrcBlendId,(int)(hdr?BlendMode.SrcAlpha:BlendMode.One));
+                material.SetInt(DstBlendId,(int)(hdr?BlendMode.OneMinusSrcAlpha:BlendMode.Zero));
+                material.SetInt(AlphaSrcBlendId,(int)(hdr?BlendMode.Zero:BlendMode.One));
+                material.SetInt(AlphaDstBlendId,(int)(hdr?BlendMode.One:BlendMode.Zero));
+                material.SetInt(SpecAlphaDstBlendId,(int)(hdr?BlendMode.OneMinusSrcAlpha:BlendMode.Zero));
+                snowTargets[2]=new RenderTargetIdentifier(lightingTarget);
+                materialHdr=hdr;
+            }
+            // HDR only needs AO. Copy alpha into a single 8-bit channel instead
+            // of carrying unused RGB through the half-size intermediate. The
+            // source GBuffer AO is already 8-bit; filtering stays unchanged.
+            StereoRenderSupport.GetTemporaryRT(commands,DiffuseId,camera,
+                hdr?ambientCopyFormat:RenderTextureFormat.ARGB32,hdr?FilterMode.Bilinear:FilterMode.Point,hdr?2:1);
+            if(hdr) commands.Blit(BuiltinRenderTextureType.GBuffer0,DiffuseId,material,1);
+            else commands.Blit(BuiltinRenderTextureType.GBuffer0,DiffuseId);
             commands.SetGlobalTexture(DiffuseId,DiffuseId);
             if(!hdr)
             {
-                commands.GetTemporaryRT(SpecularId,-1,-1,0,FilterMode.Point,RenderTextureFormat.ARGB32,RenderTextureReadWrite.Linear);
-                commands.GetTemporaryRT(LightingId,-1,-1,0,FilterMode.Point,RenderTextureFormat.ARGBHalf,RenderTextureReadWrite.Linear);
+                StereoRenderSupport.GetTemporaryRT(commands,SpecularId,camera,RenderTextureFormat.ARGB32,FilterMode.Point);
+                StereoRenderSupport.GetTemporaryRT(commands,LightingId,camera,RenderTextureFormat.ARGBHalf,FilterMode.Point);
                 commands.Blit(BuiltinRenderTextureType.GBuffer1,SpecularId);
                 commands.Blit(lightingTarget,LightingId);
                 commands.SetGlobalTexture(SpecularId,SpecularId);
                 commands.SetGlobalTexture(LightingId,LightingId);
             }
             commands.SetGlobalTexture(NormalId,BuiltinRenderTextureType.GBuffer2);
-            vehicles.Record(commands,camera,RailTracks);
-            commands.SetGlobalTexture("_DVPSNoise",noiseTexture);
-            commands.SetGlobalTexture("_DVPSNearHeight",near.Texture);
-            commands.SetGlobalTexture("_DVPSFarHeight",far.Texture);
-            commands.SetGlobalVector("_DVPSNearArea",near.Area);
-            commands.SetGlobalVector("_DVPSFarArea",far.Area);
-            commands.SetGlobalTexture("_DVPSDistantHeight",distant.Ready?distant.Texture:far.Texture);
-            commands.SetGlobalVector("_DVPSDistantArea",distant.Ready?distant.Area:far.Area);
-            commands.SetGlobalVector("_DVPSWorldOffset",worldOffset);
-            commands.SetGlobalVector("_DVPSHeightOffsets",new Vector4(near.HeightOffset,far.HeightOffset,distant.Ready?distant.HeightOffset:far.HeightOffset,0));
-            commands.SetGlobalFloat("_DVPSAmount",amount);
-            commands.SetGlobalFloat("_DVPSGlareReduction",GlareReduction);
-            commands.SetGlobalFloat("_DVPSHDR",camera.allowHDR ? 1f : 0f);
-            var probe = RenderSettings.ambientProbe;
-            probe.Evaluate(ambientDirections,ambientColors);
-            var ambient = RenderSettings.ambientMode == AmbientMode.Flat ? RenderSettings.ambientLight : ambientColors[0];
-            commands.SetGlobalColor("_DVPSAmbient",ambient);
-            commands.SetGlobalMatrix("_DVPSInverseVP",
-                (GL.GetGPUProjectionMatrix(camera.projectionMatrix,true)*camera.worldToCameraMatrix).inverse);
-            commands.SetRenderTarget(new[] { new RenderTargetIdentifier(BuiltinRenderTextureType.GBuffer0),
-                new RenderTargetIdentifier(BuiltinRenderTextureType.GBuffer1),
-                new RenderTargetIdentifier(lightingTarget) },
-                BuiltinRenderTextureType.CameraTarget);
-            commands.DrawMesh(quad,Matrix4x4.identity,material,0,0);
+            commands.EndSample("DVSeasons snow buffer preparation");
+            }
+            using(SnowPerformance.Measure("snow-vehicle-record"))
+            {
+            commands.BeginSample("DVSeasons snow vehicle surfaces");
+            // Animal visibility and exclusions belong to this outer surface
+            // scope too; their cost must not disappear between vehicle phases.
+            bool recordVehicles=!SnowRenderBenchmark.SkipVehicles;
+            if(recordVehicles)
+            {
+            vehicles.Record(commands,camera,RailTracks,exposureExclusions.PrepareVisibleAnimals(camera));
+            SnowPerformance.SnowRender(vehicles.FrameSnowDrawCount,vehicles.FrameExclusionDrawCount,
+                vehicles.ObjectLimiter.Limit,camera.pixelWidth,camera.pixelHeight,
+                vehicles.FrameInstancedExclusionCount,vehicles.FrameExclusionBatchCount,
+                vehicles.FrameInstancedFullCount,vehicles.FrameFullBatchCount,vehicles.FrameExclusionVolumeCount,
+                vehicles.NativeMaterialSlots,vehicles.FrameCombinedCommands,vehicles.FrameDistantCars,vehicles.FrameDistantCommands);
+            exposureExclusions.RecordAnimalExclusions(commands);
+            }
+            else
+            {
+                // This phase deliberately omits all vehicle/rail/animal surface
+                // commands. Clear globals instead of reusing a previous target.
+                vehicles.BindEmptyFrame(commands);
+                SnowPerformance.SnowRender(0,0,vehicles.ObjectLimiter.Limit,camera.pixelWidth,camera.pixelHeight);
+            }
+            commands.EndSample("DVSeasons snow vehicle surfaces");
+            }
+            using(SnowPerformance.Measure("snow-snow-shading-record"))
+            {
+            commands.SetGlobalTexture(NoiseId,noiseTexture);
+            commands.SetGlobalTexture(NearHeightId,near.Texture);
+            commands.SetGlobalTexture(FarHeightId,far.Texture);
+            commands.SetGlobalVector(NearAreaId,near.Area);
+            commands.SetGlobalVector(FarAreaId,far.Area);
+            commands.SetGlobalTexture(DistantHeightId,distant.Ready?distant.Texture:far.Texture);
+            commands.SetGlobalVector(DistantAreaId,distant.Ready?distant.Area:far.Area);
+            commands.SetGlobalVector(WorldOffsetId,worldOffset);
+            commands.SetGlobalVector(HeightOffsetsId,new Vector4(near.HeightOffset,far.HeightOffset,distant.Ready?distant.HeightOffset:far.HeightOffset,0));
+            commands.SetGlobalFloat(AmountId,amount);
+            commands.SetGlobalVector("_DVPSVehicleDistanceFade",new Vector4(260,300,1,0));
+            // Existing bundles retain the former world-object filter. Only
+            // rolling stock is limited now, via its per-pixel exclusion marker.
+            commands.SetGlobalFloat("_DVPSObjectLimitEnabled",0f);
+            commands.SetGlobalFloat(GlareReductionId,GlareReduction);
+            commands.SetGlobalFloat(HdrId,hdr ? 1f : 0f);
+            Color ambient;
+            if(RenderSettings.ambientMode==AmbientMode.Flat) ambient=RenderSettings.ambientLight;
+            else
+            {
+                var probe=RenderSettings.ambientProbe;
+                probe.Evaluate(ambientDirections,ambientColors);
+                ambient=ambientColors[0];
+            }
+            commands.SetGlobalColor(AmbientId,ambient);
+            commands.SetGlobalMatrix(InverseVpId,StereoRenderSupport.InverseViewProjection(camera));
+            if(camera.stereoEnabled)
+            {
+                inverseStereoVP[0]=StereoRenderSupport.InverseViewProjection(camera,Camera.StereoscopicEye.Left);
+                inverseStereoVP[1]=StereoRenderSupport.InverseViewProjection(camera,Camera.StereoscopicEye.Right);
+                commands.SetGlobalMatrixArray("_DVPSInverseVPStereo",inverseStereoVP);
+            }
+            commands.SetRenderTarget(snowTargets,BuiltinRenderTextureType.CameraTarget);
+            commands.BeginSample("DVSeasons snow shading");
+            if(!SnowRenderBenchmark.SkipShading)commands.DrawMesh(quad,Matrix4x4.identity,material,0,0);
+            commands.EndSample("DVSeasons snow shading");
+            }
+            using(SnowPerformance.Measure("snow-frame-cleanup-record"))
+            {
             commands.ReleaseTemporaryRT(DiffuseId);
             if(!hdr) { commands.ReleaseTemporaryRT(SpecularId); commands.ReleaseTemporaryRT(LightingId); }
-            vehicles.ReleaseFrame(commands);
+            if(!SnowRenderBenchmark.SkipVehicles)vehicles.ReleaseFrame(commands);
+            }
         }
 
         private void Unbind()
         {
+            Shader.SetGlobalFloat("_DVPSNativeAmount",0);
+            SnowRenderBenchmark.Unavailable();
             IsActive = false;
             if (subscribed) Camera.onPreRender -= BeforeCamera;
             if (subscribed) { SceneManager.sceneLoaded-=SceneLoaded;SceneManager.sceneUnloaded-=SceneUnloaded; }
@@ -397,6 +510,7 @@ namespace DVSeasons.Mod
             if (exposureCamera != null) DestroyResource(exposureCamera.gameObject);
             DestroyResource(near.Texture); DestroyResource(far.Texture); DestroyResource(distant.Texture);
             DestroyResource(material); DestroyResource(quad); DestroyResource(noiseTexture); noiseTexture=null;
+            materialHdr=null;
             DestroyResource(terrainExposureMaterial);terrainExposureMaterial=null;
             if(terrainExposureCommands!=null) terrainExposureCommands.Dispose();terrainExposureCommands=null;
             exposureCamera = null; near.Texture = far.Texture = distant.Texture = null; material = null; quad = null;
